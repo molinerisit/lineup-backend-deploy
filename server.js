@@ -70,9 +70,7 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 };
 
 const sendWhatsAppAlert = async (number, sensorName, temp) => {
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Silencio activo por ${
-    process.env.ALERT_COOLDOWN || 30
-  } min._\n👉 Escribe *Estado* para consultar.`;
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._\n👉 Escribe *Estado* para consultar.`;
   await responderWhatsApp(number, mensaje);
 };
 
@@ -80,7 +78,6 @@ const sendWhatsAppAlert = async (number, sensorName, temp) => {
 // RUTAS PARA EL ESP32 (Públicas)
 // ==========================================
 
-// --- ESTA ES LA RUTA QUE TE DABA 404 ---
 app.get("/api/device/config", async (req, res) => {
   try {
     const sensors = await Sensor.find({ enabled: true }).select(
@@ -117,8 +114,6 @@ app.post("/api/data", async (req, res) => {
         );
         sensor.lastAlertSent = ahora;
         await sensor.save();
-      } else {
-        console.log(`⏳ Cooldown activo para ${sensor.friendlyName}`);
       }
     }
     res.send("OK");
@@ -142,7 +137,7 @@ app.post("/api/device/status", async (req, res) => {
 });
 
 // ==========================================
-// WEBHOOK BOT INTELIGENTE
+// WEBHOOK BOT WHATSAPP
 // ==========================================
 
 app.post("/api/webhook/whatsapp", async (req, res) => {
@@ -161,8 +156,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     const user = await User.findOne({ whatsapp: from });
     if (!user) return res.sendStatus(200);
 
-    console.log(`💬 Comando de ${from}: ${text}`);
-
     if (text === "estado") {
       const sensors = await Sensor.find({ owner: user._id, enabled: true });
       let reporte = `📋 *REPORTE DE EQUIPOS*\n\n`;
@@ -176,50 +169,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         reporte += `${icon} *${s.friendlyName}*: ${temp}\n`;
       }
       await responderWhatsApp(from, reporte);
-    }
-
-    if (text.startsWith("historial")) {
-      const busqueda = text.replace("historial", "").trim();
-      const sensor = await Sensor.findOne({
-        owner: user._id,
-        friendlyName: { $regex: new RegExp(busqueda, "i") },
-      });
-      if (sensor) {
-        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
-          .sort({ timestamp: -1 })
-          .limit(10);
-        if (docs.length > 0) {
-          const chart = new QuickChart();
-          chart.setConfig({
-            type: "line",
-            data: {
-              labels: docs
-                .map((m) => new Date(m.timestamp).toLocaleTimeString())
-                .reverse(),
-              datasets: [
-                {
-                  label: "Temp °C",
-                  data: docs.map((m) => m.temperatureC).reverse(),
-                  borderColor: "#36A2EB",
-                  fill: true,
-                  backgroundColor: "rgba(54, 162, 235, 0.2)",
-                },
-              ],
-            },
-            options: {
-              title: {
-                display: true,
-                text: `Historial: ${sensor.friendlyName}`,
-              },
-            },
-          });
-          await responderWhatsAppConImagen(
-            from,
-            chart.getUrl(),
-            `📊 Historial de ${sensor.friendlyName}`
-          );
-        }
-      }
     }
     res.sendStatus(200);
   } catch (err) {
@@ -264,6 +213,33 @@ app.post("/api/auth/login", async (req, res) => {
   res.json({ token, username: user.username });
 });
 
+app.get("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("-password");
+    res.json(user);
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
+app.put("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const { whatsapp, oldPassword, newPassword } = req.body;
+    const user = await User.findById(req.user.id);
+    if (newPassword) {
+      const isMatch = await bcrypt.compare(oldPassword, user.password);
+      if (!isMatch)
+        return res.status(401).json({ message: "Contraseña incorrecta" });
+      user.password = newPassword;
+    }
+    if (whatsapp) user.whatsapp = whatsapp;
+    await user.save();
+    res.json({ message: "Perfil actualizado" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
     const data = await Sensor.aggregate([
@@ -300,6 +276,18 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
   }
 });
 
+app.get("/api/history", authenticateUser, async (req, res) => {
+  try {
+    const { sensorId, limit = 50 } = req.query;
+    const docs = await Measurement.find({ sensorId })
+      .sort({ timestamp: -1 })
+      .limit(Number(limit));
+    res.json(docs);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
 app.post("/api/sensors/config", authenticateUser, async (req, res) => {
   try {
     const sensorData = { ...req.body, owner: req.user.id, enabled: true };
@@ -314,9 +302,17 @@ app.post("/api/sensors/config", authenticateUser, async (req, res) => {
   }
 });
 
-app.get("/api/auth/profile", authenticateUser, async (req, res) => {
-  const user = await User.findById(req.user.id).select("-password");
-  res.json(user);
+app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
+  try {
+    await Sensor.deleteOne({
+      hardwareId: req.params.hardwareId,
+      owner: req.user.id,
+    });
+    await Measurement.deleteMany({ sensorId: req.params.hardwareId });
+    res.json({ message: "Eliminado" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
 });
 
 app.get("/api/sensors/ids", authenticateUser, (req, res) =>
