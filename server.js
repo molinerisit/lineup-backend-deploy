@@ -14,7 +14,6 @@ const User = require("./models/User");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Estado en memoria para el Heartbeat del ESP32
 let lastDeviceStatus = {
   online: false,
   ip: "--",
@@ -43,17 +42,14 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 // ==========================================
-// FUNCIONES DE ENVÍO WHATSAPP (ESTABLES)
+// FUNCIONES DE ENVÍO WHATSAPP
 // ==========================================
 
 const responderWhatsApp = async (number, text) => {
   try {
     await axios.post(
       `${process.env.EVOLUTION_API_URL}/message/sendText/${process.env.EVOLUTION_INSTANCE}`,
-      {
-        number: number,
-        text: text,
-      },
+      { number: number, text: text },
       { headers: { apikey: process.env.EVOLUTION_API_KEY } }
     );
   } catch (error) {
@@ -65,11 +61,7 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
   try {
     await axios.post(
       `${process.env.EVOLUTION_API_URL}/message/sendImage/${process.env.EVOLUTION_INSTANCE}`,
-      {
-        number: number,
-        url: imageUrl,
-        caption: caption,
-      },
+      { number: number, url: imageUrl, caption: caption },
       { headers: { apikey: process.env.EVOLUTION_API_KEY } }
     );
   } catch (error) {
@@ -78,21 +70,27 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 };
 
 const sendWhatsAppAlert = async (number, sensorName, temp) => {
-  const mensaje =
-    `🚨 *ALERTA DE TEMPERATURA*\n\n` +
-    `📍 *Equipo:* ${sensorName}\n` +
-    `🌡️ *Temperatura:* ${temp}°C\n\n` +
-    `⚠️ _Límite superado. Silencio activo por ${
-      process.env.ALERT_COOLDOWN || 30
-    } min._\n` +
-    `👉 Escribe *Estado* para consultar todo.`;
-
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Silencio activo por ${
+    process.env.ALERT_COOLDOWN || 30
+  } min._\n👉 Escribe *Estado* para consultar.`;
   await responderWhatsApp(number, mensaje);
 };
 
 // ==========================================
-// RUTA DE DATOS (ESP32)
+// RUTAS PARA EL ESP32 (Públicas)
 // ==========================================
+
+// --- ESTA ES LA RUTA QUE TE DABA 404 ---
+app.get("/api/device/config", async (req, res) => {
+  try {
+    const sensors = await Sensor.find({ enabled: true }).select(
+      "hardwareId pin -_id"
+    );
+    res.json(sensors);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
 
 app.post("/api/data", async (req, res) => {
   const { sensorId, tempC, voltageV } = req.body;
@@ -111,7 +109,6 @@ app.post("/api/data", async (req, res) => {
     if (tempC > sensor.alertThreshold && sensor.owner?.whatsapp) {
       const ahora = new Date();
       const cooldownMs = (process.env.ALERT_COOLDOWN || 30) * 60000;
-
       if (!sensor.lastAlertSent || ahora - sensor.lastAlertSent > cooldownMs) {
         await sendWhatsAppAlert(
           sensor.owner.whatsapp,
@@ -130,8 +127,22 @@ app.post("/api/data", async (req, res) => {
   }
 });
 
+app.post("/api/device/status", async (req, res) => {
+  const { ip, mapping } = req.body;
+  lastDeviceStatus = { online: true, ip, mapping, timestamp: new Date() };
+  if (mapping) {
+    for (const m of mapping) {
+      await Sensor.findOneAndUpdate(
+        { hardwareId: m.hardwareId },
+        { address: m.address }
+      );
+    }
+  }
+  res.json({ message: "Sincronizado" });
+});
+
 // ==========================================
-// WEBHOOK UNIFICADO (BOT INTELIGENTE)
+// WEBHOOK BOT INTELIGENTE
 // ==========================================
 
 app.post("/api/webhook/whatsapp", async (req, res) => {
@@ -146,14 +157,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     )
       .toLowerCase()
       .trim();
-
     const from = data.key.remoteJid.split("@")[0];
     const user = await User.findOne({ whatsapp: from });
     if (!user) return res.sendStatus(200);
 
-    console.log(`💬 Comando recibido de ${from}: ${text}`);
+    console.log(`💬 Comando de ${from}: ${text}`);
 
-    // COMANDO: ESTADO
     if (text === "estado") {
       const sensors = await Sensor.find({ owner: user._id, enabled: true });
       let reporte = `📋 *REPORTE DE EQUIPOS*\n\n`;
@@ -169,14 +178,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       await responderWhatsApp(from, reporte);
     }
 
-    // COMANDO: HISTORIAL + GRÁFICO
     if (text.startsWith("historial")) {
       const busqueda = text.replace("historial", "").trim();
       const sensor = await Sensor.findOne({
         owner: user._id,
         friendlyName: { $regex: new RegExp(busqueda, "i") },
       });
-
       if (sensor) {
         const docs = await Measurement.find({ sensorId: sensor.hardwareId })
           .sort({ timestamp: -1 })
@@ -191,7 +198,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
                 .reverse(),
               datasets: [
                 {
-                  label: "Temperatura °C",
+                  label: "Temp °C",
                   data: docs.map((m) => m.temperatureC).reverse(),
                   borderColor: "#36A2EB",
                   fill: true,
@@ -211,35 +218,23 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             chart.getUrl(),
             `📊 Historial de ${sensor.friendlyName}`
           );
-        } else {
-          await responderWhatsApp(
-            from,
-            `📈 No hay mediciones recientes para ${sensor.friendlyName}.`
-          );
         }
-      } else {
-        await responderWhatsApp(
-          from,
-          `❌ No encontré el equipo "${busqueda}".`
-        );
       }
     }
     res.sendStatus(200);
   } catch (err) {
-    console.error("Error Webhook:", err);
     res.sendStatus(500);
   }
 });
 
 // ==========================================
-// RUTAS DE AUTENTICACIÓN Y USUARIO
+// RUTAS FLUTTER (Privadas)
 // ==========================================
 
 const authenticateUser = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
   if (!token) return res.sendStatus(401);
-
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) return res.sendStatus(403);
     req.user = user;
@@ -268,10 +263,6 @@ app.post("/api/auth/login", async (req, res) => {
   );
   res.json({ token, username: user.username });
 });
-
-// ==========================================
-// RUTAS FLUTTER Y SENSORES
-// ==========================================
 
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
@@ -319,7 +310,7 @@ app.post("/api/sensors/config", authenticateUser, async (req, res) => {
     );
     res.json(sensor);
   } catch (err) {
-    res.status(500).json({ error: "Error al guardar" });
+    res.status(500).json({ error: "Error" });
   }
 });
 
@@ -328,54 +319,9 @@ app.get("/api/auth/profile", authenticateUser, async (req, res) => {
   res.json(user);
 });
 
-app.put("/api/auth/profile", authenticateUser, async (req, res) => {
-  try {
-    const { whatsapp, oldPassword, newPassword } = req.body;
-    const user = await User.findById(req.user.id);
-    if (newPassword) {
-      const isMatch = await bcrypt.compare(oldPassword, user.password);
-      if (!isMatch)
-        return res.status(401).json({ message: "Contraseña incorrecta" });
-      user.password = newPassword;
-    }
-    if (whatsapp) user.whatsapp = whatsapp;
-    await user.save();
-    res.json({ message: "Perfil actualizado" });
-  } catch (err) {
-    res.status(500).send("Error");
-  }
-});
-
-app.get("/api/history", authenticateUser, async (req, res) => {
-  const { sensorId, limit = 100 } = req.query;
-  const sensor = await Sensor.findOne({
-    hardwareId: sensorId,
-    owner: req.user.id,
-  });
-  if (!sensor) return res.status(403).send("No autorizado");
-  const docs = await Measurement.find({ sensorId })
-    .sort({ timestamp: -1 })
-    .limit(Number(limit));
-  res.json(docs);
-});
-
-app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
-  await Sensor.deleteOne({
-    hardwareId: req.params.hardwareId,
-    owner: req.user.id,
-  });
-  await Measurement.deleteMany({ sensorId: req.params.hardwareId });
-  res.json({ message: "Eliminado" });
-});
-
 app.get("/api/sensors/ids", authenticateUser, (req, res) =>
   res.json(ESP_HARDWARE_IDS)
 );
-app.post("/api/device/status", async (req, res) => {
-  const { ip, mapping } = req.body;
-  lastDeviceStatus = { online: true, ip, mapping, timestamp: new Date() };
-  res.json({ message: "Sincronizado" });
-});
 app.get("/api/device/status", authenticateUser, (req, res) =>
   res.json(lastDeviceStatus)
 );
