@@ -14,12 +14,14 @@ const User = require("./models/User");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Estado en memoria para el Heartbeat del ESP32
 let lastDeviceStatus = {
   online: false,
   ip: "--",
   mapping: [],
   timestamp: null,
 };
+
 const ESP_HARDWARE_IDS = [
   "HELADERA-01",
   "HELADERA-02",
@@ -42,9 +44,23 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 // ==========================================
-// FUNCIONES DE ENVÍO WHATSAPP
+// MIDDLEWARE DE AUTENTICACIÓN
 // ==========================================
+const authenticateUser = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.sendStatus(401);
 
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+};
+
+// ==========================================
+// FUNCIONES DE ENVÍO WHATSAPP (Estables)
+// ==========================================
 const responderWhatsApp = async (number, text) => {
   try {
     await axios.post(
@@ -77,7 +93,6 @@ const sendWhatsAppAlert = async (number, sensorName, temp) => {
 // ==========================================
 // RUTAS PARA EL ESP32 (Públicas)
 // ==========================================
-
 app.get("/api/device/config", async (req, res) => {
   try {
     const sensors = await Sensor.find({ enabled: true }).select(
@@ -139,7 +154,6 @@ app.post("/api/device/status", async (req, res) => {
 // ==========================================
 // WEBHOOK BOT WHATSAPP
 // ==========================================
-
 app.post("/api/webhook/whatsapp", async (req, res) => {
   try {
     const data = req.body.data;
@@ -170,6 +184,44 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       }
       await responderWhatsApp(from, reporte);
     }
+
+    if (text.startsWith("historial")) {
+      const busqueda = text.replace("historial", "").trim();
+      const sensor = await Sensor.findOne({
+        owner: user._id,
+        friendlyName: { $regex: new RegExp(busqueda, "i") },
+      });
+      if (sensor) {
+        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
+          .sort({ timestamp: -1 })
+          .limit(10);
+        if (docs.length > 0) {
+          const chart = new QuickChart();
+          chart.setConfig({
+            type: "line",
+            data: {
+              labels: docs
+                .map((m) => new Date(m.timestamp).toLocaleTimeString())
+                .reverse(),
+              datasets: [
+                {
+                  label: "Temp °C",
+                  data: docs.map((m) => m.temperatureC).reverse(),
+                  borderColor: "#36A2EB",
+                  fill: true,
+                  backgroundColor: "rgba(54, 162, 235, 0.2)",
+                },
+              ],
+            },
+          });
+          await responderWhatsAppConImagen(
+            from,
+            chart.getUrl(),
+            `📊 Historial de ${sensor.friendlyName}`
+          );
+        }
+      }
+    }
     res.sendStatus(200);
   } catch (err) {
     res.sendStatus(500);
@@ -177,20 +229,8 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 });
 
 // ==========================================
-// RUTAS FLUTTER (Privadas)
+// RUTAS FLUTTER Y PERFIL (Privadas)
 // ==========================================
-
-const authenticateUser = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.sendStatus(401);
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-};
-
 app.post("/api/auth/register", async (req, res) => {
   try {
     const user = new User(req.body);
@@ -213,33 +253,46 @@ app.post("/api/auth/login", async (req, res) => {
   res.json({ token, username: user.username });
 });
 
-app.get("/api/auth/profile", authenticateUser, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select("-password");
-    res.json(user);
-  } catch (err) {
-    res.status(500).send("Error");
-  }
-});
-
-app.put("/api/auth/profile", authenticateUser, async (req, res) => {
-  try {
-    const { whatsapp, oldPassword, newPassword } = req.body;
-    const user = await User.findById(req.user.id);
-    if (newPassword) {
-      const isMatch = await bcrypt.compare(oldPassword, user.password);
-      if (!isMatch)
-        return res.status(401).json({ message: "Contraseña incorrecta" });
-      user.password = newPassword;
+// RUTAS DE PERFIL (Espejo para evitar 404)
+app.get(
+  ["/api/auth/profile", "/api/profile"],
+  authenticateUser,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id).select("-password");
+      if (!user) return res.status(404).json({ message: "No encontrado" });
+      res.json(user);
+    } catch (err) {
+      res.status(500).send("Error");
     }
-    if (whatsapp) user.whatsapp = whatsapp;
-    await user.save();
-    res.json({ message: "Perfil actualizado" });
-  } catch (err) {
-    res.status(500).send("Error");
   }
-});
+);
 
+app.put(
+  ["/api/auth/profile", "/api/profile"],
+  authenticateUser,
+  async (req, res) => {
+    try {
+      const { whatsapp, oldPassword, newPassword } = req.body;
+      const user = await User.findById(req.user.id);
+      if (newPassword) {
+        const isMatch = await bcrypt.compare(oldPassword, user.password);
+        if (!isMatch)
+          return res.status(401).json({ message: "Pass incorrecta" });
+        user.password = newPassword;
+      }
+      if (whatsapp) user.whatsapp = whatsapp;
+      await user.save();
+      res.json({ message: "Actualizado" });
+    } catch (err) {
+      res.status(500).send("Error");
+    }
+  }
+);
+
+// ==========================================
+// GESTIÓN DE SENSORES E HISTORIAL
+// ==========================================
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
     const data = await Sensor.aggregate([
