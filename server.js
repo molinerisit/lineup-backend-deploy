@@ -14,14 +14,12 @@ const User = require("./models/User");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Estado en memoria para el Heartbeat del ESP32
 let lastDeviceStatus = {
   online: false,
   ip: "--",
   mapping: [],
   timestamp: null,
 };
-
 const ESP_HARDWARE_IDS = [
   "HELADERA-01",
   "HELADERA-02",
@@ -59,7 +57,7 @@ const authenticateUser = (req, res, next) => {
 };
 
 // ==========================================
-// FUNCIONES DE ENVÍO WHATSAPP (Estables)
+// FUNCIONES WHATSAPP
 // ==========================================
 const responderWhatsApp = async (number, text) => {
   try {
@@ -158,7 +156,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
   try {
     const data = req.body.data;
     if (!data || !data.message) return res.sendStatus(200);
-
     const text = (
       data.message.conversation ||
       data.message.extendedTextMessage?.text ||
@@ -184,44 +181,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       }
       await responderWhatsApp(from, reporte);
     }
-
-    if (text.startsWith("historial")) {
-      const busqueda = text.replace("historial", "").trim();
-      const sensor = await Sensor.findOne({
-        owner: user._id,
-        friendlyName: { $regex: new RegExp(busqueda, "i") },
-      });
-      if (sensor) {
-        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
-          .sort({ timestamp: -1 })
-          .limit(10);
-        if (docs.length > 0) {
-          const chart = new QuickChart();
-          chart.setConfig({
-            type: "line",
-            data: {
-              labels: docs
-                .map((m) => new Date(m.timestamp).toLocaleTimeString())
-                .reverse(),
-              datasets: [
-                {
-                  label: "Temp °C",
-                  data: docs.map((m) => m.temperatureC).reverse(),
-                  borderColor: "#36A2EB",
-                  fill: true,
-                  backgroundColor: "rgba(54, 162, 235, 0.2)",
-                },
-              ],
-            },
-          });
-          await responderWhatsAppConImagen(
-            from,
-            chart.getUrl(),
-            `📊 Historial de ${sensor.friendlyName}`
-          );
-        }
-      }
-    }
     res.sendStatus(200);
   } catch (err) {
     res.sendStatus(500);
@@ -231,6 +190,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 // ==========================================
 // RUTAS FLUTTER Y PERFIL (Privadas)
 // ==========================================
+
 app.post("/api/auth/register", async (req, res) => {
   try {
     const user = new User(req.body);
@@ -253,7 +213,7 @@ app.post("/api/auth/login", async (req, res) => {
   res.json({ token, username: user.username });
 });
 
-// RUTAS DE PERFIL (Espejo para evitar 404)
+// GESTIÓN DE PERFIL (Múltiples rutas para evitar el 404)
 app.get(
   ["/api/auth/profile", "/api/profile"],
   authenticateUser,
@@ -286,6 +246,27 @@ app.put(
       res.json({ message: "Actualizado" });
     } catch (err) {
       res.status(500).send("Error");
+    }
+  }
+);
+
+// RUTA PARA ELIMINAR CUENTA (Solicitada por el botón rojo de tu front)
+app.delete(
+  ["/api/auth/profile", "/api/profile"],
+  authenticateUser,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      // Buscamos los sensores del usuario para borrar sus mediciones primero
+      const sensors = await Sensor.find({ owner: userId });
+      for (const s of sensors) {
+        await Measurement.deleteMany({ sensorId: s.hardwareId });
+      }
+      await Sensor.deleteMany({ owner: userId });
+      await User.findByIdAndDelete(userId);
+      res.json({ message: "Cuenta y datos eliminados correctamente" });
+    } catch (err) {
+      res.status(500).send("Error al eliminar cuenta");
     }
   }
 );
