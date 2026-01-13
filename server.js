@@ -14,9 +14,7 @@ const User = require("./models/User");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ==========================================
-// ESTADO Y CONFIGURACIÓN GLOBAL
-// ==========================================
+// Estado en memoria para el Dashboard de Hardware
 let lastDeviceStatus = {
   online: false,
   ip: "--",
@@ -63,7 +61,7 @@ const authenticateUser = (req, res, next) => {
 };
 
 // ==========================================
-// FUNCIONES DE WHATSAPP (Evolution API)
+// FUNCIONES DE ENVÍO WHATSAPP (Evolution API)
 // ==========================================
 const responderWhatsApp = async (number, text) => {
   try {
@@ -90,12 +88,12 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 };
 
 const sendWhatsAppAlert = async (number, sensorName, temp) => {
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._\n👉 Escribe *Estado* para consultar.`;
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._\n👉 Escribí *Estado* para consultar.`;
   await responderWhatsApp(number, mensaje);
 };
 
 // ==========================================
-// RUTAS DE AUTENTICACIÓN Y REGISTRO
+// RUTAS DE AUTENTICACIÓN
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -119,18 +117,17 @@ app.post("/api/auth/login", async (req, res) => {
     );
     res.json({ token, username: user.username });
   } catch (e) {
-    res.status(500).send("Error en login");
+    res.status(500).send("Error");
   }
 });
 
 // ==========================================
-// GESTIÓN DE PERFIL (SOLUCIÓN 404)
+// RUTAS DE PERFIL (SOLUCIÓN AL 404)
 // ==========================================
 app.get("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
-    if (!user)
-      return res.status(404).json({ message: "Usuario no encontrado" });
+    if (!user) return res.status(404).json({ message: "No encontrado" });
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -143,13 +140,12 @@ app.put("/api/auth/profile", authenticateUser, async (req, res) => {
     const user = await User.findById(req.user.id);
     if (newPassword) {
       const isMatch = await bcrypt.compare(oldPassword, user.password);
-      if (!isMatch)
-        return res.status(401).json({ message: "Contraseña incorrecta" });
+      if (!isMatch) return res.status(401).json({ message: "Pass incorrecta" });
       user.password = newPassword;
     }
     if (whatsapp) user.whatsapp = whatsapp;
     await user.save();
-    res.json({ message: "Perfil actualizado" });
+    res.json({ message: "Actualizado" });
   } catch (err) {
     res.status(500).send("Error");
   }
@@ -163,14 +159,14 @@ app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
     }
     await Sensor.deleteMany({ owner: req.user.id });
     await User.findByIdAndDelete(req.user.id);
-    res.json({ message: "Cuenta y datos eliminados" });
+    res.json({ message: "Cuenta eliminada" });
   } catch (err) {
     res.status(500).send("Error");
   }
 });
 
 // ==========================================
-// RUTAS PARA EL ESP32 (Públicas)
+// RUTAS PARA EL ESP32 Y DATOS
 // ==========================================
 app.get("/api/device/config", async (req, res) => {
   try {
@@ -190,7 +186,6 @@ app.post("/api/data", async (req, res) => {
       "owner"
     );
     if (!sensor) return res.status(404).send("Sensor no configurado");
-
     await new Measurement({
       sensorId,
       temperatureC: Number(tempC),
@@ -236,11 +231,11 @@ app.post("/api/device/status", async (req, res) => {
       );
     }
   }
-  res.json({ message: "Sincronizado" });
+  res.json({ message: "OK" });
 });
 
 // ==========================================
-// WEBHOOK BOT INTERACTIVO (WhatsApp)
+// WEBHOOK BOT WHATSAPP
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   try {
@@ -316,7 +311,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE SENSORES E HISTORIAL (Flutter)
+// DASHBOARD Y SENSORES (Flutter)
 // ==========================================
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
@@ -380,14 +375,14 @@ app.post("/api/sensors/config", authenticateUser, async (req, res) => {
   }
 });
 
-app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
+app.delete("/api/sensors/:id", authenticateUser, async (req, res) => {
   try {
     const sensor = await Sensor.findOneAndDelete({
-      hardwareId: req.params.hardwareId,
+      hardwareId: req.params.id,
       owner: req.user.id,
     });
     if (sensor) await Measurement.deleteMany({ sensorId: sensor.hardwareId });
-    res.json({ message: "Eliminado" });
+    res.json({ message: "OK" });
   } catch (err) {
     res.status(500).send("Error");
   }
@@ -400,6 +395,4 @@ app.get("/api/device/status", authenticateUser, (req, res) =>
   res.json(lastDeviceStatus)
 );
 
-app.listen(PORT, () =>
-  console.log(`🚀 Servidor Final desplegado en puerto ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT}`));
