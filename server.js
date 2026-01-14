@@ -268,12 +268,13 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
       return res.status(401).json({ message: "Credenciales inválidas" });
     }
+    // Forzamos el ID a string para evitar problemas de formato
     const token = jwt.sign(
-      { id: user._id, username: user.username },
+      { id: user._id.toString(), username: user.username },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
-    console.log(`✅ Login: ${user.username}`);
+    console.log(`✅ Login exitoso: ${user.username}`);
     res.json({ token, username: user.username });
   } catch (e) {
     res.status(500).send("Error");
@@ -287,9 +288,13 @@ app.get(
     try {
       console.log("👤 Perfil solicitado para ID:", req.user.id);
       const user = await User.findById(req.user.id).select("-password");
-      if (!user) return res.status(404).json({ message: "No encontrado" });
+      if (!user) {
+          console.log("❌ Usuario no hallado con ese ID");
+          return res.status(404).json({ message: "No encontrado" });
+      }
       res.json(user);
     } catch (err) {
+      console.error("❌ Error en Profile:", err);
       res.status(500).json({ error: err.message });
     }
   }
