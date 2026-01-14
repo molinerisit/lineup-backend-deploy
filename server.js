@@ -64,7 +64,7 @@ const authenticateUser = (req, res, next) => {
 };
 
 // ==========================================
-// FUNCIONES WHATSAPP (Menú Numérico y 2 Decimales)
+// FUNCIONES WHATSAPP (Evolution API)
 // ==========================================
 
 const responderWhatsApp = async (number, text) => {
@@ -74,7 +74,7 @@ const responderWhatsApp = async (number, text) => {
       { number: number, text: text },
       { headers: { apikey: process.env.EVOLUTION_API_KEY } }
     );
-    console.log(`📤 Mensaje enviado a ${number}`);
+    console.log(`📤 WhatsApp enviado a ${number}`);
   } catch (error) {
     console.error("❌ Error texto WA:", error.message);
   }
@@ -94,12 +94,12 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 
 const sendWhatsAppAlert = async (number, sensorName, temp) => {
   const tempF = parseFloat(temp).toFixed(2);
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado._\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar avisos)\n2️⃣ - 📊 *Ver Historial* (Últimas 5)\n3️⃣ - 📋 *Estado General* (Todos)`;
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado._\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar)\n2️⃣ - 📊 *Ver Historial* (Últimas 5)\n3️⃣ - 📋 *Estado General* (Todos)`;
   await responderWhatsApp(number, mensaje);
 };
 
 // ==========================================
-// WEBHOOK: CHATBOT INTERACTIVO (CORREGIDO BÚSQUEDA)
+// WEBHOOK: CHATBOT INTERACTIVO (REVISADO)
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200);
@@ -108,7 +108,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     const data = req.body.data;
     if (!data || !data.message) return;
 
-    const from = data.key.remoteJid.split("@")[0]; // Ej: "5493412527455"
+    const from = data.key.remoteJid.split("@")[0];
     const incomingText = (
       data.message.conversation ||
       data.message.extendedTextMessage?.text ||
@@ -118,21 +118,23 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       .trim()
       .toLowerCase();
 
-    console.log(`💬 Mensaje de ${from}: "${incomingText}"`);
+    console.log(`💬 Procesando "${incomingText}" de ${from}`);
 
-    // BÚSQUEDA INTELIGENTE: Ignora el 9 del celular (compara últimos 10 dígitos)
+    // Búsqueda inteligente de Juliana (ignorando el 9)
     const suffix = from.slice(-10);
-    const user = await User.findOne({ whatsapp: { $regex: suffix + "$" } });
+    const user = await User.findOne({
+      whatsapp: { $regex: suffix + "$" },
+    }).lean();
 
-    if (!user) {
-      console.log(`⚠️ Usuario ${from} (sufijo ${suffix}) no encontrado en DB.`);
-      return;
-    }
+    if (!user) return console.log(`⚠️ Usuario ${from} no hallado.`);
 
     // OPCIÓN 1: SILENCIAR (ACK)
     if (incomingText === "1") {
       const s = await Sensor.findOneAndUpdate(
-        { owner: user._id, enabled: true, lastAlertSent: { $ne: null } },
+        {
+          owner: { $in: [user._id, user._id.toString()] },
+          lastAlertSent: { $ne: null },
+        },
         { isAcknowledged: true },
         { sort: { lastAlertSent: -1 } }
       );
@@ -143,39 +145,52 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         );
     }
 
-    // OPCIÓN 2: HISTORIAL ÚLTIMAS 5 CON 2 DECIMALES
+    // OPCIÓN 2: HISTORIAL (BÚSQUEDA REFORZADA)
     else if (incomingText === "2") {
-      const sensors = await Sensor.find({ owner: user._id, enabled: true });
+      const sensors = await Sensor.find({
+        owner: { $in: [user._id, user._id.toString()] },
+        enabled: true,
+      }).lean();
+
+      if (sensors.length === 0)
+        return await responderWhatsApp(
+          from,
+          "❌ No tienes equipos vinculados."
+        );
+
       let historialMsg = `📊 *HISTORIAL RECIENTE*\n\n`;
       for (const s of sensors) {
         const docs = await Measurement.find({ sensorId: s.hardwareId })
           .sort({ timestamp: -1 })
-          .limit(5);
+          .limit(5)
+          .lean();
         historialMsg += `*${s.friendlyName}:*\n`;
         if (docs.length > 0) {
-          docs.forEach(
-            (m) =>
-              (historialMsg += `• ${new Date(m.timestamp).toLocaleTimeString(
-                [],
-                { hour: "2-digit", minute: "2-digit" }
-              )}: ${m.temperatureC.toFixed(2)}°C\n`)
-          );
-        } else {
-          historialMsg += `(Sin mediciones)\n`;
-        }
+          docs.forEach((m) => {
+            const hora = new Date(m.timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+            historialMsg += `• ${hora}: ${m.temperatureC.toFixed(2)}°C\n`;
+          });
+        } else historialMsg += `(Sin datos)\n`;
         historialMsg += `\n`;
       }
       await responderWhatsApp(from, historialMsg);
     }
 
-    // OPCIÓN 3: REPORTE GENERAL
+    // OPCIÓN 3: ESTADO GENERAL
     else if (incomingText === "3" || incomingText === "estado") {
-      const sensors = await Sensor.find({ owner: user._id, enabled: true });
+      const sensors = await Sensor.find({
+        owner: { $in: [user._id, user._id.toString()] },
+        enabled: true,
+      }).lean();
+
       let reporte = `📋 *ESTADO ACTUAL*\n\n`;
       for (const s of sensors) {
-        const lastM = await Measurement.findOne({
-          sensorId: s.hardwareId,
-        }).sort({ timestamp: -1 });
+        const lastM = await Measurement.findOne({ sensorId: s.hardwareId })
+          .sort({ timestamp: -1 })
+          .lean();
         const icon =
           lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢";
         const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
@@ -183,13 +198,49 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       }
       await responderWhatsApp(from, reporte);
     }
+
+    // COMANDO GRAFICO
+    else if (incomingText.startsWith("grafico")) {
+      const busqueda = incomingText.replace("grafico", "").trim();
+      const sensor = await Sensor.findOne({
+        owner: { $in: [user._id, user._id.toString()] },
+        friendlyName: { $regex: new RegExp(busqueda, "i") },
+      });
+      if (sensor) {
+        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
+          .sort({ timestamp: -1 })
+          .limit(15);
+        const chart = new QuickChart();
+        chart.setConfig({
+          type: "line",
+          data: {
+            labels: docs
+              .map((m) => new Date(m.timestamp).toLocaleTimeString())
+              .reverse(),
+            datasets: [
+              {
+                label: "Temp °C",
+                data: docs.map((m) => m.temperatureC).reverse(),
+                borderColor: "#36A2EB",
+                fill: true,
+              },
+            ],
+          },
+        });
+        await responderWhatsAppConImagen(
+          from,
+          chart.getUrl(),
+          `📊 Curva de ${sensor.friendlyName}`
+        );
+      }
+    }
   } catch (err) {
     console.error("❌ Error Webhook:", err);
   }
 });
 
 // ==========================================
-// RUTAS DE AUTENTICACIÓN Y PERFIL
+// RUTAS DE AUTENTICACIÓN Y PERFIL (COMPLETAS)
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -249,6 +300,21 @@ app.put("/api/auth/profile", authenticateUser, async (req, res) => {
   }
 });
 
+app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const sensors = await Sensor.find({ owner: userId });
+    for (const s of sensors) {
+      await Measurement.deleteMany({ sensorId: s.hardwareId });
+    }
+    await Sensor.deleteMany({ owner: userId });
+    await User.findByIdAndDelete(userId);
+    res.json({ message: "Cuenta eliminada" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
 // ==========================================
 // GESTIÓN DE SENSORES Y DASHBOARD (FLUTTER)
 // ==========================================
@@ -293,7 +359,8 @@ app.get("/api/history", authenticateUser, async (req, res) => {
     const { sensorId, limit = 50 } = req.query;
     const docs = await Measurement.find({ sensorId })
       .sort({ timestamp: -1 })
-      .limit(Number(limit));
+      .limit(Number(limit))
+      .lean();
     res.json(docs);
   } catch (err) {
     res.status(500).json([]);
@@ -327,9 +394,24 @@ app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
   }
 });
 
+app.get("/api/sensors/ids", authenticateUser, (req, res) =>
+  res.json(ESP_HARDWARE_IDS)
+);
+
 // ==========================================
-// RECEPCIÓN DE DATOS (ESP32)
+// HARDWARE (ESP32)
 // ==========================================
+app.get("/api/device/config", async (req, res) => {
+  try {
+    const sensors = await Sensor.find({ enabled: true }).select(
+      "hardwareId pin -_id"
+    );
+    res.json(sensors);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
 app.post("/api/data", async (req, res) => {
   const { sensorId, tempC, voltageV } = req.body;
   try {
@@ -385,11 +467,9 @@ app.post("/api/device/status", async (req, res) => {
 app.get("/api/device/status", authenticateUser, (req, res) =>
   res.json(lastDeviceStatus)
 );
-app.get("/api/sensors/ids", authenticateUser, (req, res) =>
-  res.json(ESP_HARDWARE_IDS)
-);
+
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Servidor Final desplegado en puerto ${PORT}`)
+  console.log(`🚀 Servidor LineUp Final desplegado en puerto ${PORT}`)
 );
