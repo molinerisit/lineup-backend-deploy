@@ -12,9 +12,14 @@ const sensorSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    alertThreshold: {
+    // Umbrales Duales
+    minThreshold: {
       type: Number,
-      default: 5.0,
+      default: 0.0,
+    },
+    maxThreshold: {
+      type: Number,
+      default: 10.0,
     },
     voltageThreshold: {
       type: Number,
@@ -26,14 +31,10 @@ const sensorSchema = new mongoose.Schema(
     },
     address: {
       type: String,
-      default: null, // Se llena automáticamente cuando el ESP32 sincroniza
+      default: null,
     },
-    lastAlertSent: { type: Date }, // <--- AGREGAR ESTO
-    owner: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
+    lastAlertSent: { type: Date, default: null },
+    isAcknowledged: { type: Boolean, default: false },
     enabled: {
       type: Boolean,
       default: true,

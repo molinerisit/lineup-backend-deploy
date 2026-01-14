@@ -66,7 +66,6 @@ const authenticateUser = (req, res, next) => {
 // ==========================================
 // FUNCIONES WHATSAPP (Evolution API)
 // ==========================================
-
 const responderWhatsApp = async (number, text) => {
   try {
     await axios.post(
@@ -92,18 +91,18 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
   }
 };
 
-const sendWhatsAppAlert = async (number, sensorName, temp) => {
+const sendWhatsAppAlert = async (number, sensorName, temp, tipo) => {
   const tempF = parseFloat(temp).toFixed(2);
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado._\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar)\n2️⃣ - 📊 *Ver Historial* (Últimas 5)\n3️⃣ - 📋 *Estado General* (Todos)`;
+  const emoji = tipo === "ALTA" ? "🔥" : "❄️";
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA ${tipo}*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado ${emoji}_\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar)\n2️⃣ - 📊 *Ver Historial* (Últimas 5)\n3️⃣ - 📋 *Estado General* (Todos)`;
   await responderWhatsApp(number, mensaje);
 };
 
 // ==========================================
-// WEBHOOK: CHATBOT INTERACTIVO (REVISADO)
+// WEBHOOK: CHATBOT INTERACTIVO (BÚSQUEDA FLEXIBLE)
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200);
-
   try {
     const data = req.body.data;
     if (!data || !data.message) return;
@@ -119,13 +118,10 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       .toLowerCase();
 
     console.log(`💬 Procesando "${incomingText}" de ${from}`);
-
-    // Búsqueda inteligente de Juliana (ignorando el 9)
     const suffix = from.slice(-10);
     const user = await User.findOne({
       whatsapp: { $regex: suffix + "$" },
     }).lean();
-
     if (!user) return console.log(`⚠️ Usuario ${from} no hallado.`);
 
     // OPCIÓN 1: SILENCIAR (ACK)
@@ -145,13 +141,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         );
     }
 
-    // OPCIÓN 2: HISTORIAL (BÚSQUEDA REFORZADA)
+    // OPCIÓN 2: HISTORIAL
     else if (incomingText === "2") {
       const sensors = await Sensor.find({
-        owner: { $in: [user._id, user._id.toString()] },
+        owner: user._id,
         enabled: true,
       }).lean();
-
       if (sensors.length === 0)
         return await responderWhatsApp(
           from,
@@ -160,19 +155,22 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 
       let historialMsg = `📊 *HISTORIAL RECIENTE*\n\n`;
       for (const s of sensors) {
-        const docs = await Measurement.find({ sensorId: s.hardwareId })
+        const docs = await Measurement.find({
+          sensorId: s.hardwareId,
+          owner: user._id,
+        })
           .sort({ timestamp: -1 })
           .limit(5)
           .lean();
         historialMsg += `*${s.friendlyName}:*\n`;
         if (docs.length > 0) {
-          docs.forEach((m) => {
-            const hora = new Date(m.timestamp).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            });
-            historialMsg += `• ${hora}: ${m.temperatureC.toFixed(2)}°C\n`;
-          });
+          docs.forEach(
+            (m) =>
+              (historialMsg += `• ${new Date(m.timestamp).toLocaleTimeString(
+                [],
+                { hour: "2-digit", minute: "2-digit" }
+              )}: ${m.temperatureC.toFixed(2)}°C\n`)
+          );
         } else historialMsg += `(Sin datos)\n`;
         historialMsg += `\n`;
       }
@@ -182,17 +180,23 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     // OPCIÓN 3: ESTADO GENERAL
     else if (incomingText === "3" || incomingText === "estado") {
       const sensors = await Sensor.find({
-        owner: { $in: [user._id, user._id.toString()] },
+        owner: user._id,
         enabled: true,
       }).lean();
-
       let reporte = `📋 *ESTADO ACTUAL*\n\n`;
       for (const s of sensors) {
-        const lastM = await Measurement.findOne({ sensorId: s.hardwareId })
+        const lastM = await Measurement.findOne({
+          sensorId: s.hardwareId,
+          owner: user._id,
+        })
           .sort({ timestamp: -1 })
           .lean();
         const icon =
-          lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢";
+          lastM &&
+          (lastM.temperatureC > s.maxThreshold ||
+            lastM.temperatureC < s.minThreshold)
+            ? "🔴"
+            : "🟢";
         const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
         reporte += `${icon} *${s.friendlyName}*: ${val}°C\n`;
       }
@@ -203,11 +207,14 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     else if (incomingText.startsWith("grafico")) {
       const busqueda = incomingText.replace("grafico", "").trim();
       const sensor = await Sensor.findOne({
-        owner: { $in: [user._id, user._id.toString()] },
+        owner: user._id,
         friendlyName: { $regex: new RegExp(busqueda, "i") },
       });
       if (sensor) {
-        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
+        const docs = await Measurement.find({
+          sensorId: sensor.hardwareId,
+          owner: user._id,
+        })
           .sort({ timestamp: -1 })
           .limit(15);
         const chart = new QuickChart();
@@ -240,7 +247,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 });
 
 // ==========================================
-// RUTAS DE AUTENTICACIÓN Y PERFIL (COMPLETAS)
+// RUTAS DE AUTENTICACIÓN Y PERFIL
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -303,10 +310,7 @@ app.put("/api/auth/profile", authenticateUser, async (req, res) => {
 app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
     const userId = req.user.id;
-    const sensors = await Sensor.find({ owner: userId });
-    for (const s of sensors) {
-      await Measurement.deleteMany({ sensorId: s.hardwareId });
-    }
+    await Measurement.deleteMany({ owner: userId });
     await Sensor.deleteMany({ owner: userId });
     await User.findByIdAndDelete(userId);
     res.json({ message: "Cuenta eliminada" });
@@ -341,7 +345,8 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
         $group: {
           _id: "$hardwareId",
           friendlyName: { $first: "$friendlyName" },
-          alertThreshold: { $first: "$alertThreshold" },
+          maxThreshold: { $first: "$maxThreshold" },
+          minThreshold: { $first: "$minThreshold" },
           temperatureC: { $first: "$m.temperatureC" },
           voltageV: { $first: "$m.voltageV" },
           timestamp: { $first: "$m.timestamp" },
@@ -356,10 +361,12 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
 
 app.get("/api/history", authenticateUser, async (req, res) => {
   try {
-    const { sensorId, limit = 50 } = req.query;
-    const docs = await Measurement.find({ sensorId })
+    const docs = await Measurement.find({
+      sensorId: req.query.sensorId,
+      owner: req.user.id,
+    })
       .sort({ timestamp: -1 })
-      .limit(Number(limit))
+      .limit(50)
       .lean();
     res.json(docs);
   } catch (err) {
@@ -369,15 +376,14 @@ app.get("/api/history", authenticateUser, async (req, res) => {
 
 app.post("/api/sensors/config", authenticateUser, async (req, res) => {
   try {
-    const sensorData = { ...req.body, owner: req.user.id, enabled: true };
     const sensor = await Sensor.findOneAndUpdate(
       { hardwareId: req.body.hardwareId },
-      sensorData,
+      { ...req.body, owner: req.user.id, enabled: true },
       { upsert: true, new: true }
     );
     res.json(sensor);
   } catch (err) {
-    res.status(500).json({ error: "Error" });
+    res.status(500).send("Error");
   }
 });
 
@@ -387,7 +393,11 @@ app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
       hardwareId: req.params.hardwareId,
       owner: req.user.id,
     });
-    if (sensor) await Measurement.deleteMany({ sensorId: sensor.hardwareId });
+    if (sensor)
+      await Measurement.deleteMany({
+        sensorId: sensor.hardwareId,
+        owner: req.user.id,
+      });
     res.json({ message: "Eliminado" });
   } catch (err) {
     res.status(500).send("Error");
@@ -423,29 +433,35 @@ app.post("/api/data", async (req, res) => {
     const tempNum = parseFloat(tempC);
     await new Measurement({
       sensorId,
+      owner: sensor.owner._id,
       temperatureC: tempNum,
       voltageV: Number(voltageV),
     }).save();
 
-    if (tempNum <= sensor.alertThreshold && sensor.isAcknowledged) {
+    if (
+      tempNum >= sensor.minThreshold &&
+      tempNum <= sensor.maxThreshold &&
+      sensor.isAcknowledged
+    ) {
       await Sensor.updateOne(
         { hardwareId: sensorId },
         { isAcknowledged: false }
       );
     }
 
-    if (
-      tempNum > sensor.alertThreshold &&
-      !sensor.isAcknowledged &&
-      sensor.owner?.whatsapp
-    ) {
+    let tipoAlerta = null;
+    if (tempNum > sensor.maxThreshold) tipoAlerta = "ALTA";
+    if (tempNum < sensor.minThreshold) tipoAlerta = "BAJA";
+
+    if (tipoAlerta && !sensor.isAcknowledged && sensor.owner?.whatsapp) {
       const ahora = new Date();
       const cooldownMs = (process.env.ALERT_COOLDOWN || 30) * 60000;
       if (!sensor.lastAlertSent || ahora - sensor.lastAlertSent > cooldownMs) {
         await sendWhatsAppAlert(
           sensor.owner.whatsapp,
           sensor.friendlyName,
-          tempNum
+          tempNum,
+          tipoAlerta
         );
         await Sensor.updateOne(
           { hardwareId: sensorId },
@@ -471,5 +487,5 @@ app.get("/api/device/status", authenticateUser, (req, res) =>
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Servidor LineUp Final desplegado en puerto ${PORT}`)
+  console.log(`🚀 Servidor LineUp Integral v2 desplegado en puerto ${PORT}`)
 );

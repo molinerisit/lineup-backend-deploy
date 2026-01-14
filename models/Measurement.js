@@ -6,6 +6,13 @@ const MeasurementSchema = new mongoose.Schema({
         required: true,
         index: true 
     },
+    // NUEVO: Referencia al dueño para búsqueda ultra-rápida y segura
+    owner: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+        index: true
+    },
     temperatureC: {
         type: Number,
         required: true
