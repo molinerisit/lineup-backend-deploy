@@ -12,9 +12,7 @@ const Sensor = require("./models/Sensor");
 const User = require("./models/User");
 
 const app = express();
-// Configuración para proxies (Railway)
 app.set("trust proxy", 1);
-
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
@@ -103,15 +101,15 @@ const sendWhatsAppAlert = async (number, sensorName, temp) => {
 // WEBHOOK: CHATBOT INTERACTIVO (REVISADO)
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
+  // Respondemos 200 OK inmediatamente para evitar reintentos de Evolution
+  res.sendStatus(200);
+
   try {
     const data = req.body.data;
-    console.log("📩 Webhook recibido de Evolution");
+    if (!data || !data.message) return;
 
-    if (!data || !data.message) return res.sendStatus(200);
     const from = data.key.remoteJid.split("@")[0];
-
-    // Captura flexible de texto para diferentes versiones de Evolution
-    const text = (
+    const incomingText = (
       data.message.conversation ||
       data.message.extendedTextMessage?.text ||
       data.message.text ||
@@ -120,13 +118,13 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       .trim()
       .toLowerCase();
 
-    console.log(`💬 Mensaje de ${from}: "${text}"`);
+    console.log(`💬 Procesando mensaje de ${from}: "${incomingText}"`);
 
     const user = await User.findOne({ whatsapp: from });
-    if (!user) return res.sendStatus(200);
+    if (!user) return;
 
-    // LÓGICA DE MENÚ POR NÚMEROS
-    if (text === "1") {
+    // OPCIÓN 1: SILENCIAR (ACK)
+    if (incomingText === "1") {
       const s = await Sensor.findOneAndUpdate(
         { owner: user._id, enabled: true, lastAlertSent: { $ne: null } },
         { isAcknowledged: true },
@@ -137,7 +135,15 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
           from,
           `✅ *Entendido.* Alertas de "${s.friendlyName}" silenciadas hasta que se normalice.`
         );
-    } else if (text === "2") {
+      else
+        await responderWhatsApp(
+          from,
+          "❌ No hay alertas activas recientes para silenciar."
+        );
+    }
+
+    // OPCIÓN 2: HISTORIAL ÚLTIMAS 5 CON 2 DECIMALES
+    else if (incomingText === "2") {
       const sensors = await Sensor.find({ owner: user._id, enabled: true });
       let historialMsg = `📊 *HISTORIAL RECIENTE*\n\n`;
       for (const s of sensors) {
@@ -145,16 +151,23 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
           .sort({ timestamp: -1 })
           .limit(5);
         historialMsg += `*${s.friendlyName}:*\n`;
-        docs.forEach(
-          (m) =>
-            (historialMsg += `• ${new Date(
-              m.timestamp
-            ).toLocaleTimeString()}: ${m.temperatureC.toFixed(2)}°C\n`)
-        );
+        if (docs.length > 0) {
+          docs.forEach(
+            (m) =>
+              (historialMsg += `• ${new Date(
+                m.timestamp
+              ).toLocaleTimeString()}: ${m.temperatureC.toFixed(2)}°C\n`)
+          );
+        } else {
+          historialMsg += `(Sin mediciones)\n`;
+        }
         historialMsg += `\n`;
       }
       await responderWhatsApp(from, historialMsg);
-    } else if (text === "3" || text === "estado") {
+    }
+
+    // OPCIÓN 3 o "Estado": REPORTE GENERAL
+    else if (incomingText === "3" || incomingText === "estado") {
       const sensors = await Sensor.find({ owner: user._id, enabled: true });
       let reporte = `📋 *ESTADO ACTUAL*\n\n`;
       for (const s of sensors) {
@@ -163,13 +176,15 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         }).sort({ timestamp: -1 });
         const icon =
           lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢";
-        reporte += `${icon} *${s.friendlyName}*: ${
-          lastM ? lastM.temperatureC.toFixed(2) : "--"
-        }°C\n`;
+        const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
+        reporte += `${icon} *${s.friendlyName}*: ${val}°C\n`;
       }
       await responderWhatsApp(from, reporte);
-    } else if (text.startsWith("historial")) {
-      const busqueda = text.replace("historial", "").trim();
+    }
+
+    // COMANDO HISTORIAL GRÁFICO
+    else if (incomingText.startsWith("grafico")) {
+      const busqueda = incomingText.replace("grafico", "").trim();
       const sensor = await Sensor.findOne({
         owner: user._id,
         friendlyName: { $regex: new RegExp(busqueda, "i") },
@@ -204,10 +219,8 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         }
       }
     }
-    res.sendStatus(200);
   } catch (err) {
     console.error("❌ Error Webhook:", err);
-    res.sendStatus(500);
   }
 });
 
@@ -383,6 +396,7 @@ app.post("/api/data", async (req, res) => {
       voltageV: Number(voltageV),
     }).save();
 
+    // Reset silenciado si la temperatura es normal
     if (tempNum <= sensor.alertThreshold && sensor.isAcknowledged) {
       await Sensor.updateOne(
         { hardwareId: sensorId },
@@ -390,6 +404,7 @@ app.post("/api/data", async (req, res) => {
       );
     }
 
+    // Alerta si supera límite y NO está silenciado
     if (
       tempNum > sensor.alertThreshold &&
       !sensor.isAcknowledged &&
@@ -439,5 +454,5 @@ app.get("/api/sensors/ids", authenticateUser, (req, res) =>
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Servidor Final desplegado en puerto ${PORT}`)
+  console.log(`🚀 Servidor LineUp Integral en Puerto ${PORT}`)
 );
