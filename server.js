@@ -58,7 +58,10 @@ const authenticateUser = (req, res, next) => {
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ message: "Token inválido" });
+    if (err) {
+      console.log("❌ Error de JWT:", err.message);
+      return res.status(401).json({ message: "Token inválido o expirado" });
+    }
     req.user = user;
     next();
   });
@@ -92,7 +95,7 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 };
 
 const sendWhatsAppAlert = async (number, sensorName, temp) => {
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._\n👉 Escribí *Estado* para consultar todo.`;
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._\n👉 Escribe *Estado* para consultar.`;
   await responderWhatsApp(number, mensaje);
 };
 
@@ -118,12 +121,11 @@ app.post("/api/data", async (req, res) => {
     );
     if (!sensor) return res.status(404).send("Sensor no configurado");
 
-    const nuevaMedicion = new Measurement({
+    await new Measurement({
       sensorId,
       temperatureC: Number(tempC),
       voltageV: Number(voltageV),
-    });
-    await nuevaMedicion.save();
+    }).save();
 
     if (tempC > sensor.alertThreshold && sensor.owner?.whatsapp) {
       const ahora = new Date();
@@ -199,44 +201,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
       }
       await responderWhatsApp(from, reporte);
     }
-
-    if (text.startsWith("historial")) {
-      const busqueda = text.replace("historial", "").trim();
-      const sensor = await Sensor.findOne({
-        owner: user._id,
-        friendlyName: { $regex: new RegExp(busqueda, "i") },
-      });
-      if (sensor) {
-        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
-          .sort({ timestamp: -1 })
-          .limit(10);
-        if (docs.length > 0) {
-          const chart = new QuickChart();
-          chart.setConfig({
-            type: "line",
-            data: {
-              labels: docs
-                .map((m) => new Date(m.timestamp).toLocaleTimeString())
-                .reverse(),
-              datasets: [
-                {
-                  label: "Temp °C",
-                  data: docs.map((m) => m.temperatureC).reverse(),
-                  borderColor: "#36A2EB",
-                  fill: true,
-                  backgroundColor: "rgba(54, 162, 235, 0.2)",
-                },
-              ],
-            },
-          });
-          await responderWhatsAppConImagen(
-            from,
-            chart.getUrl(),
-            `📊 Historial de ${sensor.friendlyName}`
-          );
-        }
-      }
-    }
     res.sendStatus(200);
   } catch (err) {
     res.sendStatus(500);
@@ -274,12 +238,13 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE PERFIL (USUARIO)
+// GESTIÓN DE PERFIL (SOLUCIÓN 401)
 // ==========================================
 app.get("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
-    if (!user) return res.status(404).json({ message: "No encontrado" });
+    if (!user)
+      return res.status(404).json({ message: "Usuario no encontrado" });
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -306,12 +271,13 @@ app.put("/api/auth/profile", authenticateUser, async (req, res) => {
 
 app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
-    const sensors = await Sensor.find({ owner: req.user.id });
+    const userId = req.user.id;
+    const sensors = await Sensor.find({ owner: userId });
     for (const s of sensors) {
       await Measurement.deleteMany({ sensorId: s.hardwareId });
     }
-    await Sensor.deleteMany({ owner: req.user.id });
-    await User.findByIdAndDelete(req.user.id);
+    await Sensor.deleteMany({ owner: userId });
+    await User.findByIdAndDelete(userId);
     res.json({ message: "Cuenta eliminada" });
   } catch (err) {
     res.status(500).send("Error");
@@ -319,7 +285,7 @@ app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE SENSORES Y DASHBOARD
+// GESTIÓN DE SENSORES E HISTORIAL
 // ==========================================
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
@@ -403,6 +369,4 @@ app.get("/api/device/status", authenticateUser, (req, res) =>
   res.json(lastDeviceStatus)
 );
 
-app.listen(PORT, () =>
-  console.log(`🚀 Servidor Final activo en puerto ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT}`));
