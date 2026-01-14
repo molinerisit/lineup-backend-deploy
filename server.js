@@ -12,6 +12,7 @@ const Sensor = require("./models/Sensor");
 const User = require("./models/User");
 
 const app = express();
+app.set('trust proxy', 1); // <--- AGREGA ESTO
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
