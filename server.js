@@ -54,23 +54,17 @@ const authenticateUser = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
 
-  if (!token) {
-    console.log("⚠️ Acceso denegado: No hay token");
-    return res.status(401).json({ message: "No token provided" });
-  }
+  if (!token) return res.status(401).json({ message: "No token provided" });
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      console.log("❌ Error de JWT:", err.message);
-      return res.status(401).json({ message: "Token inválido o expirado" });
-    }
+    if (err) return res.status(401).json({ message: "Token inválido" });
     req.user = user;
     next();
   });
 };
 
 // ==========================================
-// FUNCIONES WHATSAPP (Evolution API con Botones)
+// FUNCIONES WHATSAPP (Interactive Messages)
 // ==========================================
 
 const responderWhatsApp = async (number, text) => {
@@ -110,36 +104,163 @@ const sendWhatsAppButtons = async (number, sensorName, temp, sensorId) => {
         },
       ],
     };
-
     await axios.post(
       `${process.env.EVOLUTION_API_URL}/message/sendButtons/${process.env.EVOLUTION_INSTANCE}`,
       data,
       { headers: { apikey: process.env.EVOLUTION_API_KEY } }
     );
   } catch (error) {
-    console.error("❌ Error enviando botones, enviando texto de respaldo...");
     await responderWhatsApp(
       number,
-      `🚨 *ALERTA:* ${sensorName} a ${temp}°C\nEscribí 'Estado' para ver más.`
+      `🚨 *ALERTA:* ${sensorName} a ${temp}°C. Escribí 'Estado'.`
     );
   }
 };
 
-const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
+// ==========================================
+// RUTAS DE AUTENTICACIÓN Y PERFIL
+// ==========================================
+app.post("/api/auth/register", async (req, res) => {
   try {
-    await axios.post(
-      `${process.env.EVOLUTION_API_URL}/message/sendImage/${process.env.EVOLUTION_INSTANCE}`,
-      { number: number, url: imageUrl, caption: caption },
-      { headers: { apikey: process.env.EVOLUTION_API_KEY } }
-    );
-  } catch (error) {
-    console.error("❌ Error imagen WA:", error.message);
+    const user = new User(req.body);
+    await user.save();
+    res.json({ message: "Usuario creado" });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
-};
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.body.username });
+    if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
+      return res.status(401).json({ message: "Credenciales inválidas" });
+    }
+    const token = jwt.sign(
+      { id: user._id.toString(), username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+    res.json({ token, username: user.username });
+  } catch (e) {
+    res.status(500).send("Error");
+  }
+});
+
+app.get(
+  ["/api/auth/profile", "/api/auth/profile/"],
+  authenticateUser,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id).select("-password");
+      if (!user) return res.status(404).json({ message: "No encontrado" });
+      res.json(user);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const sensors = await Sensor.find({ owner: userId });
+    for (const s of sensors) {
+      await Measurement.deleteMany({ sensorId: s.hardwareId });
+    }
+    await Sensor.deleteMany({ owner: userId });
+    await User.findByIdAndDelete(userId);
+    res.json({ message: "Cuenta eliminada" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
 
 // ==========================================
-// RUTAS PARA EL ESP32 Y RECEPCIÓN DE DATOS
+// GESTIÓN DE SENSORES Y DASHBOARD (FLUTTER)
 // ==========================================
+
+app.get("/api/latest", authenticateUser, async (req, res) => {
+  try {
+    const data = await Sensor.aggregate([
+      {
+        $match: {
+          owner: new mongoose.Types.ObjectId(req.user.id),
+          enabled: true,
+        },
+      },
+      {
+        $lookup: {
+          from: "measurements",
+          localField: "hardwareId",
+          foreignField: "sensorId",
+          as: "m",
+        },
+      },
+      { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
+      { $sort: { "m.timestamp": -1 } },
+      {
+        $group: {
+          _id: "$hardwareId",
+          friendlyName: { $first: "$friendlyName" },
+          alertThreshold: { $first: "$alertThreshold" },
+          temperatureC: { $first: "$m.temperatureC" },
+          voltageV: { $first: "$m.voltageV" },
+          timestamp: { $first: "$m.timestamp" },
+        },
+      },
+    ]);
+    res.json(data);
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
+// RUTA RESTAURADA: Historial de mediciones
+app.get("/api/history", authenticateUser, async (req, res) => {
+  try {
+    const { sensorId, limit = 50 } = req.query;
+    const docs = await Measurement.find({ sensorId })
+      .sort({ timestamp: -1 })
+      .limit(Number(limit));
+    res.json(docs);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
+// RUTA RESTAURADA: Configuración de sensores
+app.post("/api/sensors/config", authenticateUser, async (req, res) => {
+  try {
+    const sensorData = { ...req.body, owner: req.user.id, enabled: true };
+    const sensor = await Sensor.findOneAndUpdate(
+      { hardwareId: req.body.hardwareId },
+      sensorData,
+      { upsert: true, new: true }
+    );
+    res.json(sensor);
+  } catch (err) {
+    res.status(500).json({ error: "Error" });
+  }
+});
+
+app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
+  try {
+    const sensor = await Sensor.findOneAndDelete({
+      hardwareId: req.params.hardwareId,
+      owner: req.user.id,
+    });
+    if (sensor) await Measurement.deleteMany({ sensorId: sensor.hardwareId });
+    res.json({ message: "Eliminado" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
+// ==========================================
+// HARDWARE (ESP32)
+// ==========================================
+
 app.get("/api/device/config", async (req, res) => {
   try {
     const sensors = await Sensor.find({ enabled: true }).select(
@@ -165,7 +286,6 @@ app.post("/api/data", async (req, res) => {
       voltageV: Number(voltageV),
     }).save();
 
-    // Si la temperatura vuelve a la normalidad, reseteamos el silenciado (ACK)
     if (tempC <= sensor.alertThreshold && sensor.isAcknowledged) {
       await Sensor.updateOne(
         { hardwareId: sensorId },
@@ -173,7 +293,6 @@ app.post("/api/data", async (req, res) => {
       );
     }
 
-    // Disparar alerta si supera límite Y no ha sido "Recibido"
     if (
       tempC > sensor.alertThreshold &&
       !sensor.isAcknowledged &&
@@ -212,35 +331,24 @@ app.post("/api/device/status", async (req, res) => {
     mapping,
     timestamp: new Date(),
   };
-  if (mapping) {
-    for (const m of mapping) {
-      await Sensor.findOneAndUpdate(
-        { hardwareId: m.hardwareId },
-        { address: m.address }
-      );
-    }
-  }
-  res.json({ message: "Sincronizado" });
+  res.json({ message: "OK" });
 });
 
+app.get("/api/device/status", authenticateUser, (req, res) =>
+  res.json(lastDeviceStatus)
+);
+app.get("/api/sensors/ids", authenticateUser, (req, res) =>
+  res.json(ESP_HARDWARE_IDS)
+);
+
 // ==========================================
-// WEBHOOK: PROCESAR BOTONES Y MENSAJES
+// WEBHOOK: BOTONES WHATSAPP
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   try {
     const data = req.body.data;
     if (!data || !data.message) return res.sendStatus(200);
-
     const from = data.key.remoteJid.split("@")[0];
-    const text = (
-      data.message.conversation ||
-      data.message.extendedTextMessage?.text ||
-      ""
-    )
-      .toLowerCase()
-      .trim();
-
-    // Detectar si el mensaje es un click en un botón
     const buttonId =
       data.message.buttonsResponseMessage?.selectedButtonId ||
       data.message.templateButtonReplyMessage?.selectedId ||
@@ -249,7 +357,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     const user = await User.findOne({ whatsapp: from });
     if (!user) return res.sendStatus(200);
 
-    // Lógica para botones e historial de texto
     if (buttonId) {
       if (buttonId.startsWith("ack_")) {
         const hId = buttonId.replace("ack_", "");
@@ -259,28 +366,27 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         );
         await responderWhatsApp(
           from,
-          "✅ *Alerta Silenciada.* No recibirás más avisos de este equipo hasta que la temperatura se normalice."
+          "✅ *Alerta Silenciada.* Se reactivará cuando la temperatura se normalice."
         );
       }
-
       if (buttonId.startsWith("status_")) {
         const hId = buttonId.replace("status_", "");
         const s = await Sensor.findOne({ hardwareId: hId });
         const docs = await Measurement.find({ sensorId: hId })
           .sort({ timestamp: -1 })
           .limit(5);
-        let msg = `📊 *ESTADO RECIENTE: ${s.friendlyName}*\n\n`;
-        docs.forEach((m) => {
-          msg += `• ${new Date(m.timestamp).toLocaleTimeString()}: *${
-            m.temperatureC
-          }°C*\n`;
-        });
+        let msg = `📊 *ÚLTIMAS 5: ${s.friendlyName}*\n\n`;
+        docs.forEach(
+          (m) =>
+            (msg += `• ${new Date(m.timestamp).toLocaleTimeString()}: *${
+              m.temperatureC
+            }°C*\n`)
+        );
         await responderWhatsApp(from, msg);
       }
-
       if (buttonId === "all_sensors") {
         const sensors = await Sensor.find({ owner: user._id, enabled: true });
-        let reporte = `📋 *ESTADO DE TODOS LOS EQUIPOS*\n\n`;
+        let reporte = `📋 *TODOS LOS EQUIPOS*\n\n`;
         for (const s of sensors) {
           const lastM = await Measurement.findOne({
             sensorId: s.hardwareId,
@@ -292,118 +398,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         await responderWhatsApp(from, reporte);
       }
     }
-
-    // Comandos de texto tradicionales (compatibilidad)
-    if (text === "estado") {
-      const sensors = await Sensor.find({ owner: user._id, enabled: true });
-      let reporte = `📋 *REPORTE DE EQUIPOS*\n\n`;
-      for (const s of sensors) {
-        const lastM = await Measurement.findOne({
-          sensorId: s.hardwareId,
-        }).sort({ timestamp: -1 });
-        reporte += `${
-          lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢"
-        } *${s.friendlyName}*: ${lastM ? lastM.temperatureC : "N/A"}°C\n`;
-      }
-      await responderWhatsApp(from, reporte);
-    }
     res.sendStatus(200);
   } catch (err) {
     res.sendStatus(500);
   }
 });
 
-// ==========================================
-// AUTENTICACIÓN Y PERFIL
-// ==========================================
-app.post("/api/auth/register", async (req, res) => {
-  try {
-    const user = new User(req.body);
-    await user.save();
-    res.json({ message: "Usuario creado" });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const user = await User.findOne({ username: req.body.username });
-    if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
-      return res.status(401).json({ message: "Credenciales inválidas" });
-    }
-    const token = jwt.sign(
-      { id: user._id.toString(), username: user.username },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-    console.log(`✅ Login exitoso: ${user.username}`);
-    res.json({ token, username: user.username });
-  } catch (e) {
-    res.status(500).send("Error");
-  }
-});
-
-app.get(
-  ["/api/auth/profile", "/api/auth/profile/"],
-  authenticateUser,
-  async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id).select("-password");
-      if (!user) return res.status(404).json({ message: "No encontrado" });
-      res.json(user);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  }
+app.listen(PORT, () =>
+  console.log(`🚀 Servidor Final desplegado en puerto ${PORT}`)
 );
-
-// ... (Demás rutas DELETE y PUT de perfil permanecen iguales a tu versión original)
-
-// ==========================================
-// DASHBOARD Y CONFIGURACIÓN
-// ==========================================
-app.get("/api/latest", authenticateUser, async (req, res) => {
-  try {
-    const data = await Sensor.aggregate([
-      {
-        $match: {
-          owner: new mongoose.Types.ObjectId(req.user.id),
-          enabled: true,
-        },
-      },
-      {
-        $lookup: {
-          from: "measurements",
-          localField: "hardwareId",
-          foreignField: "sensorId",
-          as: "m",
-        },
-      },
-      { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
-      { $sort: { "m.timestamp": -1 } },
-      {
-        $group: {
-          _id: "$hardwareId",
-          friendlyName: { $first: "$friendlyName" },
-          alertThreshold: { $first: "$alertThreshold" },
-          temperatureC: { $first: "$m.temperatureC" },
-          voltageV: { $first: "$m.voltageV" },
-          timestamp: { $first: "$m.timestamp" },
-        },
-      },
-    ]);
-    res.json(data);
-  } catch (err) {
-    res.status(500).send("Error");
-  }
-});
-
-app.get("/api/sensors/ids", authenticateUser, (req, res) =>
-  res.json(ESP_HARDWARE_IDS)
-);
-app.get("/api/device/status", authenticateUser, (req, res) =>
-  res.json(lastDeviceStatus)
-);
-
-app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT}`));
