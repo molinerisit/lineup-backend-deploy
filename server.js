@@ -64,9 +64,8 @@ const authenticateUser = (req, res, next) => {
 };
 
 // ==========================================
-// FUNCIONES WHATSAPP (Interactive Messages)
+// FUNCIONES WHATSAPP (Evolution API)
 // ==========================================
-
 const responderWhatsApp = async (number, text) => {
   try {
     await axios.post(
@@ -79,12 +78,25 @@ const responderWhatsApp = async (number, text) => {
   }
 };
 
+const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
+  try {
+    await axios.post(
+      `${process.env.EVOLUTION_API_URL}/message/sendImage/${process.env.EVOLUTION_INSTANCE}`,
+      { number: number, url: imageUrl, caption: caption },
+      { headers: { apikey: process.env.EVOLUTION_API_KEY } }
+    );
+  } catch (error) {
+    console.error("❌ Error imagen WA:", error.message);
+  }
+};
+
 const sendWhatsAppButtons = async (number, sensorName, temp, sensorId) => {
   try {
+    const tempFormateada = parseFloat(temp).toFixed(2);
     const data = {
       number: number,
-      buttonText: "Opciones",
-      description: `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${temp}°C\n\n⚠️ _Límite superado._`,
+      buttonText: "Ver opciones",
+      description: `🚨 *ALERTA DE TEMPERATURA*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempFormateada}°C\n\n⚠️ _Límite superado._`,
       footerText: "LineUp Trazabilidad",
       buttons: [
         {
@@ -110,15 +122,223 @@ const sendWhatsAppButtons = async (number, sensorName, temp, sensorId) => {
       { headers: { apikey: process.env.EVOLUTION_API_KEY } }
     );
   } catch (error) {
+    const tempF = parseFloat(temp).toFixed(2);
     await responderWhatsApp(
       number,
-      `🚨 *ALERTA:* ${sensorName} a ${temp}°C. Escribí 'Estado'.`
+      `🚨 *ALERTA:* ${sensorName} a ${tempF}°C. Escribí 'Estado'.`
     );
   }
 };
 
 // ==========================================
-// RUTAS DE AUTENTICACIÓN Y PERFIL
+// RUTAS PARA EL ESP32 Y RECEPCIÓN DE DATOS
+// ==========================================
+app.get("/api/device/config", async (req, res) => {
+  try {
+    const sensors = await Sensor.find({ enabled: true }).select(
+      "hardwareId pin -_id"
+    );
+    res.json(sensors);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
+app.post("/api/data", async (req, res) => {
+  const { sensorId, tempC, voltageV } = req.body;
+  try {
+    const sensor = await Sensor.findOne({ hardwareId: sensorId }).populate(
+      "owner"
+    );
+    if (!sensor) return res.status(404).send("Sensor no configurado");
+
+    const tempNum = parseFloat(tempC);
+    await new Measurement({
+      sensorId,
+      temperatureC: tempNum,
+      voltageV: Number(voltageV),
+    }).save();
+
+    if (tempNum <= sensor.alertThreshold && sensor.isAcknowledged) {
+      await Sensor.updateOne(
+        { hardwareId: sensorId },
+        { isAcknowledged: false }
+      );
+    }
+
+    if (
+      tempNum > sensor.alertThreshold &&
+      !sensor.isAcknowledged &&
+      sensor.owner?.whatsapp
+    ) {
+      const ahora = new Date();
+      const cooldownMs = (process.env.ALERT_COOLDOWN || 30) * 60000;
+      if (!sensor.lastAlertSent || ahora - sensor.lastAlertSent > cooldownMs) {
+        await sendWhatsAppButtons(
+          sensor.owner.whatsapp,
+          sensor.friendlyName,
+          tempNum,
+          sensor.hardwareId
+        );
+        await Sensor.updateOne(
+          { hardwareId: sensorId },
+          { lastAlertSent: ahora }
+        );
+      }
+    }
+    res.send("OK");
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
+app.post("/api/device/status", async (req, res) => {
+  const { ip, oneWirePin, physicalSensors, configuredSensors, mapping } =
+    req.body;
+  lastDeviceStatus = {
+    online: true,
+    ip,
+    oneWirePin,
+    physicalSensors,
+    configuredSensors,
+    mapping,
+    timestamp: new Date(),
+  };
+  if (mapping) {
+    for (const m of mapping) {
+      await Sensor.findOneAndUpdate(
+        { hardwareId: m.hardwareId },
+        { address: m.address }
+      );
+    }
+  }
+  res.json({ message: "Sincronizado" });
+});
+
+// ==========================================
+// WEBHOOK BOT WHATSAPP
+// ==========================================
+app.post("/api/webhook/whatsapp", async (req, res) => {
+  try {
+    const data = req.body.data;
+    if (!data || !data.message) return res.sendStatus(200);
+    const from = data.key.remoteJid.split("@")[0];
+    const text = (
+      data.message.conversation ||
+      data.message.extendedTextMessage?.text ||
+      ""
+    )
+      .toLowerCase()
+      .trim();
+
+    const buttonId =
+      data.message.buttonsResponseMessage?.selectedButtonId ||
+      data.message.templateButtonReplyMessage?.selectedId ||
+      data.message.listResponseMessage?.singleSelectReply.selectedRowId;
+
+    const user = await User.findOne({ whatsapp: from });
+    if (!user) return res.sendStatus(200);
+
+    if (buttonId) {
+      if (buttonId.startsWith("ack_")) {
+        const hId = buttonId.replace("ack_", "");
+        await Sensor.findOneAndUpdate(
+          { hardwareId: hId },
+          { isAcknowledged: true }
+        );
+        await responderWhatsApp(from, "✅ *Alerta Silenciada.*");
+      }
+      if (buttonId.startsWith("status_")) {
+        const hId = buttonId.replace("status_", "");
+        const s = await Sensor.findOne({ hardwareId: hId });
+        const docs = await Measurement.find({ sensorId: hId })
+          .sort({ timestamp: -1 })
+          .limit(5);
+        let msg = `📊 *ÚLTIMAS 5: ${s.friendlyName}*\n\n`;
+        docs.forEach(
+          (m) =>
+            (msg += `• ${new Date(
+              m.timestamp
+            ).toLocaleTimeString()}: *${m.temperatureC.toFixed(2)}°C*\n`)
+        );
+        await responderWhatsApp(from, msg);
+      }
+      if (buttonId === "all_sensors") {
+        const sensors = await Sensor.find({ owner: user._id, enabled: true });
+        let reporte = `📋 *TODOS LOS EQUIPOS*\n\n`;
+        for (const s of sensors) {
+          const lastM = await Measurement.findOne({
+            sensorId: s.hardwareId,
+          }).sort({ timestamp: -1 });
+          const tempVal = lastM ? `${lastM.temperatureC.toFixed(2)}°C` : "--";
+          reporte += `${
+            lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢"
+          } *${s.friendlyName}*: ${tempVal}\n`;
+        }
+        await responderWhatsApp(from, reporte);
+      }
+    }
+
+    if (text === "estado") {
+      const sensors = await Sensor.find({ owner: user._id, enabled: true });
+      let reporte = `📋 *REPORTE DE EQUIPOS*\n\n`;
+      for (const s of sensors) {
+        const lastM = await Measurement.findOne({
+          sensorId: s.hardwareId,
+        }).sort({ timestamp: -1 });
+        const temp = lastM ? `${lastM.temperatureC.toFixed(2)}°C` : "N/A";
+        const icon =
+          lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢";
+        reporte += `${icon} *${s.friendlyName}*: ${temp}\n`;
+      }
+      await responderWhatsApp(from, reporte);
+    }
+
+    if (text.startsWith("historial")) {
+      const busqueda = text.replace("historial", "").trim();
+      const sensor = await Sensor.findOne({
+        owner: user._id,
+        friendlyName: { $regex: new RegExp(busqueda, "i") },
+      });
+      if (sensor) {
+        const docs = await Measurement.find({ sensorId: sensor.hardwareId })
+          .sort({ timestamp: -1 })
+          .limit(15);
+        if (docs.length > 0) {
+          const chart = new QuickChart();
+          chart.setConfig({
+            type: "line",
+            data: {
+              labels: docs
+                .map((m) => new Date(m.timestamp).toLocaleTimeString())
+                .reverse(),
+              datasets: [
+                {
+                  label: "Temp °C",
+                  data: docs.map((m) => m.temperatureC).reverse(),
+                  borderColor: "#36A2EB",
+                  fill: true,
+                  backgroundColor: "rgba(54, 162, 235, 0.2)",
+                },
+              ],
+            },
+          });
+          await responderWhatsAppConImagen(
+            from,
+            chart.getUrl(),
+            `📊 Historial de ${sensor.friendlyName}`
+          );
+        }
+      }
+    }
+    res.sendStatus(200);
+  } catch (err) {
+    res.sendStatus(500);
+  }
+});
+
+// ==========================================
+// AUTENTICACIÓN Y PERFIL
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -153,7 +373,6 @@ app.get(
   async (req, res) => {
     try {
       const user = await User.findById(req.user.id).select("-password");
-      if (!user) return res.status(404).json({ message: "No encontrado" });
       res.json(user);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -161,13 +380,26 @@ app.get(
   }
 );
 
+app.put("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const { whatsapp, oldPassword, newPassword } = req.body;
+    const user = await User.findById(req.user.id);
+    if (newPassword) {
+      const isMatch = await bcrypt.compare(oldPassword, user.password);
+      if (!isMatch) return res.status(401).json({ message: "Pass incorrecta" });
+      user.password = newPassword;
+    }
+    if (whatsapp) user.whatsapp = whatsapp;
+    await user.save();
+    res.json({ message: "Actualizado" });
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
+
 app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
     const userId = req.user.id;
-    const sensors = await Sensor.find({ owner: userId });
-    for (const s of sensors) {
-      await Measurement.deleteMany({ sensorId: s.hardwareId });
-    }
     await Sensor.deleteMany({ owner: userId });
     await User.findByIdAndDelete(userId);
     res.json({ message: "Cuenta eliminada" });
@@ -177,9 +409,8 @@ app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE SENSORES Y DASHBOARD (FLUTTER)
+// DASHBOARD Y CONFIGURACIÓN (FLUTTER)
 // ==========================================
-
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
     const data = await Sensor.aggregate([
@@ -216,7 +447,6 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
   }
 });
 
-// RUTA RESTAURADA: Historial de mediciones
 app.get("/api/history", authenticateUser, async (req, res) => {
   try {
     const { sensorId, limit = 50 } = req.query;
@@ -229,7 +459,6 @@ app.get("/api/history", authenticateUser, async (req, res) => {
   }
 });
 
-// RUTA RESTAURADA: Configuración de sensores
 app.post("/api/sensors/config", authenticateUser, async (req, res) => {
   try {
     const sensorData = { ...req.body, owner: req.user.id, enabled: true };
@@ -257,152 +486,13 @@ app.delete("/api/sensors/:hardwareId", authenticateUser, async (req, res) => {
   }
 });
 
-// ==========================================
-// HARDWARE (ESP32)
-// ==========================================
-
-app.get("/api/device/config", async (req, res) => {
-  try {
-    const sensors = await Sensor.find({ enabled: true }).select(
-      "hardwareId pin -_id"
-    );
-    res.json(sensors);
-  } catch (err) {
-    res.status(500).json([]);
-  }
-});
-
-app.post("/api/data", async (req, res) => {
-  const { sensorId, tempC, voltageV } = req.body;
-  try {
-    const sensor = await Sensor.findOne({ hardwareId: sensorId }).populate(
-      "owner"
-    );
-    if (!sensor) return res.status(404).send("Sensor no configurado");
-
-    await new Measurement({
-      sensorId,
-      temperatureC: Number(tempC),
-      voltageV: Number(voltageV),
-    }).save();
-
-    if (tempC <= sensor.alertThreshold && sensor.isAcknowledged) {
-      await Sensor.updateOne(
-        { hardwareId: sensorId },
-        { isAcknowledged: false }
-      );
-    }
-
-    if (
-      tempC > sensor.alertThreshold &&
-      !sensor.isAcknowledged &&
-      sensor.owner?.whatsapp
-    ) {
-      const ahora = new Date();
-      const cooldownMs = (process.env.ALERT_COOLDOWN || 30) * 60000;
-      if (!sensor.lastAlertSent || ahora - sensor.lastAlertSent > cooldownMs) {
-        await sendWhatsAppButtons(
-          sensor.owner.whatsapp,
-          sensor.friendlyName,
-          tempC,
-          sensor.hardwareId
-        );
-        await Sensor.updateOne(
-          { hardwareId: sensorId },
-          { lastAlertSent: ahora }
-        );
-      }
-    }
-    res.send("OK");
-  } catch (err) {
-    res.status(500).send("Error");
-  }
-});
-
-app.post("/api/device/status", async (req, res) => {
-  const { ip, oneWirePin, physicalSensors, configuredSensors, mapping } =
-    req.body;
-  lastDeviceStatus = {
-    online: true,
-    ip,
-    oneWirePin,
-    physicalSensors,
-    configuredSensors,
-    mapping,
-    timestamp: new Date(),
-  };
-  res.json({ message: "OK" });
-});
-
-app.get("/api/device/status", authenticateUser, (req, res) =>
-  res.json(lastDeviceStatus)
-);
 app.get("/api/sensors/ids", authenticateUser, (req, res) =>
   res.json(ESP_HARDWARE_IDS)
 );
-
-// ==========================================
-// WEBHOOK: BOTONES WHATSAPP
-// ==========================================
-app.post("/api/webhook/whatsapp", async (req, res) => {
-  try {
-    const data = req.body.data;
-    if (!data || !data.message) return res.sendStatus(200);
-    const from = data.key.remoteJid.split("@")[0];
-    const buttonId =
-      data.message.buttonsResponseMessage?.selectedButtonId ||
-      data.message.templateButtonReplyMessage?.selectedId ||
-      data.message.listResponseMessage?.singleSelectReply.selectedRowId;
-
-    const user = await User.findOne({ whatsapp: from });
-    if (!user) return res.sendStatus(200);
-
-    if (buttonId) {
-      if (buttonId.startsWith("ack_")) {
-        const hId = buttonId.replace("ack_", "");
-        await Sensor.findOneAndUpdate(
-          { hardwareId: hId },
-          { isAcknowledged: true }
-        );
-        await responderWhatsApp(
-          from,
-          "✅ *Alerta Silenciada.* Se reactivará cuando la temperatura se normalice."
-        );
-      }
-      if (buttonId.startsWith("status_")) {
-        const hId = buttonId.replace("status_", "");
-        const s = await Sensor.findOne({ hardwareId: hId });
-        const docs = await Measurement.find({ sensorId: hId })
-          .sort({ timestamp: -1 })
-          .limit(5);
-        let msg = `📊 *ÚLTIMAS 5: ${s.friendlyName}*\n\n`;
-        docs.forEach(
-          (m) =>
-            (msg += `• ${new Date(m.timestamp).toLocaleTimeString()}: *${
-              m.temperatureC
-            }°C*\n`)
-        );
-        await responderWhatsApp(from, msg);
-      }
-      if (buttonId === "all_sensors") {
-        const sensors = await Sensor.find({ owner: user._id, enabled: true });
-        let reporte = `📋 *TODOS LOS EQUIPOS*\n\n`;
-        for (const s of sensors) {
-          const lastM = await Measurement.findOne({
-            sensorId: s.hardwareId,
-          }).sort({ timestamp: -1 });
-          reporte += `${
-            lastM && lastM.temperatureC > s.alertThreshold ? "🔴" : "🟢"
-          } *${s.friendlyName}*: ${lastM ? lastM.temperatureC : "--"}°C\n`;
-        }
-        await responderWhatsApp(from, reporte);
-      }
-    }
-    res.sendStatus(200);
-  } catch (err) {
-    res.sendStatus(500);
-  }
-});
+app.get("/api/device/status", authenticateUser, (req, res) =>
+  res.json(lastDeviceStatus)
+);
+app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
   console.log(`🚀 Servidor Final desplegado en puerto ${PORT}`)
