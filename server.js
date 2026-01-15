@@ -16,12 +16,13 @@ app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// ESTADO Y CONFIGURACIÓN GLOBAL
+// ESTADO GLOBAL
 // ==========================================
 let lastDeviceStatus = {
   online: false,
   ip: "--",
-  oneWirePin: 0,
+  oneWirePin: 25,
+  doorPins: "26, 27, 14",
   physicalSensors: 0,
   configuredSensors: 0,
   mapping: [],
@@ -94,12 +95,12 @@ const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
 const sendWhatsAppAlert = async (number, sensorName, temp, tipo) => {
   const tempF = parseFloat(temp).toFixed(2);
   const emoji = tipo === "ALTA" ? "🔥" : "❄️";
-  const mensaje = `🚨 *ALERTA DE TEMPERATURA ${tipo}*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado ${emoji}_\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar)\n2️⃣ - 📊 *Ver Historial* (Últimas 5)\n3️⃣ - 📋 *Estado General* (Todos)`;
+  const mensaje = `🚨 *ALERTA DE TEMPERATURA ${tipo}*\n\n📍 *Equipo:* ${sensorName}\n🌡️ *Temperatura:* ${tempF}°C\n\n⚠️ _Límite superado ${emoji}_\n\n*Responde con un número:*\n1️⃣ - ✅ *Recibido* (Silenciar)\n2️⃣ - 📊 *Ver Historial*\n3️⃣ - 📋 *Estado General*`;
   await responderWhatsApp(number, mensaje);
 };
 
 // ==========================================
-// WEBHOOK: CHATBOT CON CORRECCIÓN HORARIA
+// WEBHOOK: CHATBOT INTERACTIVO (CON CORRECCIÓN HORARIA)
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200);
@@ -107,53 +108,100 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     const data = req.body.data;
     if (!data || !data.message) return;
     const from = data.key.remoteJid.split("@")[0];
-    const incomingText = (data.message.conversation || data.message.extendedTextMessage?.text || data.message.text || "").trim().toLowerCase();
+    const incomingText = (
+      data.message.conversation ||
+      data.message.extendedTextMessage?.text ||
+      data.message.text ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
 
     const suffix = from.slice(-10);
-    const user = await User.findOne({ whatsapp: { $regex: suffix + "$" } }).lean();
+    const user = await User.findOne({
+      whatsapp: { $regex: suffix + "$" },
+    }).lean();
     if (!user) return;
 
-    if (incomingText === "2") {
-      const sensors = await Sensor.find({ owner: user._id, enabled: true }).lean();
-      if (sensors.length === 0) return await responderWhatsApp(from, "❌ No tienes equipos vinculados.");
+    if (incomingText === "1") {
+      const s = await Sensor.findOneAndUpdate(
+        { owner: user._id, lastAlertSent: { $ne: null } },
+        { isAcknowledged: true },
+        { sort: { lastAlertSent: -1 } }
+      );
+      if (s)
+        await responderWhatsApp(
+          from,
+          `✅ *Entendido.* Alertas de "${s.friendlyName}" silenciadas.`
+        );
+    } else if (incomingText === "2") {
+      const sensors = await Sensor.find({
+        owner: user._id,
+        enabled: true,
+      }).lean();
+      if (sensors.length === 0)
+        return await responderWhatsApp(
+          from,
+          "❌ No tienes equipos vinculados."
+        );
 
       let historialMsg = `📊 *HISTORIAL RECIENTE*\n\n`;
       for (const s of sensors) {
-        const docs = await Measurement.find({ sensorId: s.hardwareId, owner: user._id }).sort({ timestamp: -1 }).limit(5).lean();
+        const docs = await Measurement.find({
+          sensorId: s.hardwareId,
+          owner: user._id,
+        })
+          .sort({ timestamp: -1 })
+          .limit(5)
+          .lean();
         historialMsg += `*${s.friendlyName}:*\n`;
-        
         if (docs.length > 0) {
-          docs.forEach(m => {
-            // CORRECCIÓN: Forzamos Zona Horaria de Argentina (America/Argentina/Buenos_Aires)
-            const horaLocal = new Date(m.timestamp).toLocaleTimeString('es-AR', {
-              timeZone: 'America/Argentina/Buenos_Aires',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: true
-            });
-            historialMsg += `• ${horaLocal}: *${m.temperatureC.toFixed(2)}°C*\n`;
+          docs.forEach((m) => {
+            const horaLocal = new Date(m.timestamp).toLocaleTimeString(
+              "es-AR",
+              {
+                timeZone: "America/Argentina/Buenos_Aires",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+              }
+            );
+            historialMsg += `• ${horaLocal}: *${m.temperatureC.toFixed(
+              2
+            )}°C*\n`;
           });
-        } else {
-          historialMsg += `(Sin mediciones recientes)\n`;
-        }
+        } else historialMsg += `(Sin mediciones recientes)\n`;
         historialMsg += `\n`;
       }
       await responderWhatsApp(from, historialMsg);
-    } 
-    
-    // OPCIÓN 3: ESTADO GENERAL (También con corrección horaria en el log si quisieras)
-    else if (incomingText === "3" || incomingText === "estado") {
-      const sensors = await Sensor.find({ owner: user._id, enabled: true }).lean();
+    } else if (incomingText === "3" || incomingText === "estado") {
+      const sensors = await Sensor.find({
+        owner: user._id,
+        enabled: true,
+      }).lean();
       let reporte = `📋 *ESTADO ACTUAL*\n\n`;
       for (const s of sensors) {
-        const lastM = await Measurement.findOne({ sensorId: s.hardwareId, owner: user._id }).sort({ timestamp: -1 }).lean();
-        const icon = lastM && (lastM.temperatureC > s.maxThreshold || lastM.temperatureC < s.minThreshold) ? "🔴" : "🟢";
+        const lastM = await Measurement.findOne({
+          sensorId: s.hardwareId,
+          owner: user._id,
+        })
+          .sort({ timestamp: -1 })
+          .lean();
+        const icon =
+          lastM &&
+          (lastM.temperatureC > s.maxThreshold ||
+            lastM.temperatureC < s.minThreshold)
+            ? "🔴"
+            : "🟢";
         const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
-        reporte += `${icon} *${s.friendlyName}*: ${val}°C\n`;
+        const puertaIcon = s.isDoorOpen ? "🚪 ABIERTA" : "🔒 Cerrada";
+        reporte += `${icon} *${s.friendlyName}*: ${val}°C (${puertaIcon})\n`;
       }
       await responderWhatsApp(from, reporte);
     }
-  } catch (err) { console.error("❌ Error Webhook:", err); }
+  } catch (err) {
+    console.error("❌ Error Webhook:", err);
+  }
 });
 
 // ==========================================
@@ -186,19 +234,14 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.get(
-  ["/api/auth/profile", "/api/auth/profile/"],
-  authenticateUser,
-  async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id).select("-password");
-      if (!user) return res.status(404).json({ message: "No encontrado" });
-      res.json(user);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
+app.get("/api/auth/profile", authenticateUser, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("-password");
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-);
+});
 
 app.put("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
@@ -257,6 +300,7 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
           friendlyName: { $first: "$friendlyName" },
           maxThreshold: { $first: "$maxThreshold" },
           minThreshold: { $first: "$minThreshold" },
+          isDoorOpen: { $first: "$isDoorOpen" }, // NUEVO: Estado de puerta
           temperatureC: { $first: "$m.temperatureC" },
           voltageV: { $first: "$m.voltageV" },
           timestamp: { $first: "$m.timestamp" },
@@ -319,21 +363,10 @@ app.get("/api/sensors/ids", authenticateUser, (req, res) =>
 );
 
 // ==========================================
-// HARDWARE (ESP32)
+// RECEPCIÓN DE DATOS (ESP32) - PUERTA PERSISTENTE Y BATERÍA
 // ==========================================
-app.get("/api/device/config", async (req, res) => {
-  try {
-    const sensors = await Sensor.find({ enabled: true }).select(
-      "hardwareId pin -_id"
-    );
-    res.json(sensors);
-  } catch (err) {
-    res.status(500).json([]);
-  }
-});
-
 app.post("/api/data", async (req, res) => {
-  const { sensorId, tempC, voltageV } = req.body;
+  const { sensorId, tempC, voltageV, doorOpen } = req.body;
   try {
     const sensor = await Sensor.findOne({ hardwareId: sensorId }).populate(
       "owner"
@@ -341,13 +374,52 @@ app.post("/api/data", async (req, res) => {
     if (!sensor) return res.status(404).send("Sensor no configurado");
 
     const tempNum = parseFloat(tempC);
+    const vBat = parseFloat(voltageV);
+    const estaAbierta = doorOpen === 1;
+
+    // 1. Guardar Historial
     await new Measurement({
       sensorId,
       owner: sensor.owner._id,
       temperatureC: tempNum,
-      voltageV: Number(voltageV),
+      voltageV: vBat,
     }).save();
 
+    // 2. Lógica de Puerta Persistente
+    let doorUpdate = { isDoorOpen: estaAbierta };
+
+    if (estaAbierta) {
+      if (!sensor.isDoorOpen) {
+        // Marcamos el inicio de la apertura si antes estaba cerrada
+        doorUpdate.doorOpenedAt = new Date();
+      } else {
+        // Chequeamos tiempo transcurrido (2 minutos)
+        const diff = new Date() - (sensor.doorOpenedAt || new Date());
+        if (diff > 120000) {
+          await responderWhatsApp(
+            sensor.owner.whatsapp,
+            `🚪 *PUERTA ABIERTA:* El equipo "${sensor.friendlyName}" lleva más de 2 minutos abierto.`
+          );
+          // Reseteamos contador para avisar de nuevo en 2 min si sigue abierta
+          doorUpdate.doorOpenedAt = new Date();
+        }
+      }
+    } else {
+      doorUpdate.doorOpenedAt = null;
+    }
+
+    // Actualizamos el Sensor en DB
+    await Sensor.updateOne({ hardwareId: sensorId }, { $set: doorUpdate });
+
+    // 3. Lógica de Batería Baja
+    if (vBat < 3.5 && vBat > 1.0) {
+      await responderWhatsApp(
+        sensor.owner.whatsapp,
+        `🪫 *BATERÍA BAJA:* "${sensor.friendlyName}" tiene ${vBat.toFixed(2)}V.`
+      );
+    }
+
+    // 4. Lógica de Temperatura
     if (
       tempNum >= sensor.minThreshold &&
       tempNum <= sensor.maxThreshold &&
@@ -393,9 +465,10 @@ app.post("/api/device/status", async (req, res) => {
 app.get("/api/device/status", authenticateUser, (req, res) =>
   res.json(lastDeviceStatus)
 );
-
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Servidor LineUp Integral v2 desplegado en puerto ${PORT}`)
+  console.log(
+    `🚀 Servidor LineUp Integral v3 (Puerta Persistente) desplegado en puerto ${PORT}`
+  )
 );

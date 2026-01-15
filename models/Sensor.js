@@ -29,6 +29,9 @@ const sensorSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    // --- NUEVOS CAMPOS DE PUERTA ---
+    isDoorOpen: { type: Boolean, default: false }, 
+    doorOpenedAt: { type: Date, default: null }, // Para calcular los 2 minutos
     address: {
       type: String,
       default: null,
