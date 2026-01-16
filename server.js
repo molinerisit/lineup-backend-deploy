@@ -7,6 +7,7 @@ const bcrypt = require("bcryptjs");
 const axios = require("axios");
 const QuickChart = require("quickchart-js");
 
+// Modelos (Asegúrate de tener estos archivos en tu carpeta /models)
 const Measurement = require("./models/Measurement");
 const Sensor = require("./models/Sensor");
 const User = require("./models/User");
@@ -16,7 +17,7 @@ app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// ESTADO GLOBAL Y CONFIGURACIÓN
+// ESTADO GLOBAL DEL HARDWARE
 // ==========================================
 let lastDeviceStatus = {
   online: false,
@@ -29,6 +30,7 @@ let lastDeviceStatus = {
   timestamp: null,
 };
 
+// IDs permitidos para los equipos
 const ESP_HARDWARE_IDS = [
   "HELADERA-01",
   "HELADERA-02",
@@ -80,18 +82,6 @@ const responderWhatsApp = async (number, text) => {
   }
 };
 
-const responderWhatsAppConImagen = async (number, imageUrl, caption = "") => {
-  try {
-    await axios.post(
-      `${process.env.EVOLUTION_API_URL}/message/sendImage/${process.env.EVOLUTION_INSTANCE}`,
-      { number: number, url: imageUrl, caption: caption },
-      { headers: { apikey: process.env.EVOLUTION_API_KEY } }
-    );
-  } catch (error) {
-    console.error("❌ Error imagen WA:", error.message);
-  }
-};
-
 const sendWhatsAppAlert = async (number, sensorName, temp, tipo) => {
   const tempF = parseFloat(temp).toFixed(2);
   const emoji = tipo === "ALTA" ? "🔥" : "❄️";
@@ -100,7 +90,7 @@ const sendWhatsAppAlert = async (number, sensorName, temp, tipo) => {
 };
 
 // ==========================================
-// WEBHOOK: CHATBOT INTERACTIVO (CON CORRECCIÓN HORARIA)
+// WEBHOOK: CHATBOT INTERACTIVO
 // ==========================================
 app.post("/api/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200);
@@ -155,6 +145,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
           .limit(5)
           .lean();
         historialMsg += `*${s.friendlyName}:*\n`;
+
         if (docs.length > 0) {
           docs.forEach((m) => {
             const horaLocal = new Date(m.timestamp).toLocaleTimeString(
@@ -170,7 +161,9 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
               2
             )}°C*\n`;
           });
-        } else historialMsg += `(Sin mediciones recientes)\n`;
+        } else {
+          historialMsg += `(Sin mediciones recientes)\n`;
+        }
         historialMsg += `\n`;
       }
       await responderWhatsApp(from, historialMsg);
@@ -193,10 +186,9 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             lastM.temperatureC < s.minThreshold)
             ? "🔴"
             : "🟢";
+        const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
         const pIcon = s.isDoorOpen ? "🚪 ABIERTA" : "🔒 Cerrada";
-        reporte += `${icon} *${s.friendlyName}*: ${
-          lastM ? lastM.temperatureC.toFixed(2) : "--"
-        }°C (${pIcon})\n`;
+        reporte += `${icon} *${s.friendlyName}*: ${val}°C (${pIcon})\n`;
       }
       await responderWhatsApp(from, reporte);
     }
@@ -210,8 +202,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { username, password, whatsapp } = req.body;
-    const user = new User({ username, password, whatsapp });
+    const user = new User(req.body);
     await user.save();
     res.json({ message: "Usuario creado" });
   } catch (err) {
@@ -247,16 +238,30 @@ app.get("/api/auth/profile", authenticateUser, async (req, res) => {
 
 app.put("/api/auth/profile", authenticateUser, async (req, res) => {
   try {
-    const { whatsapp, oldPassword, newPassword } = req.body;
+    const {
+      whatsapp,
+      oldPassword,
+      newPassword,
+      whatsappAlerts,
+      useDoorSensors,
+    } = req.body;
     const user = await User.findById(req.user.id);
+
     if (newPassword) {
       const isMatch = await bcrypt.compare(oldPassword, user.password);
       if (!isMatch) return res.status(401).json({ message: "Pass incorrecta" });
       user.password = newPassword;
     }
     if (whatsapp) user.whatsapp = whatsapp;
+
+    // ACTUALIZACIÓN DE PREFERENCIAS (NUEVO)
+    if (typeof whatsappAlerts !== "undefined")
+      user.whatsappAlerts = whatsappAlerts;
+    if (typeof useDoorSensors !== "undefined")
+      user.useDoorSensors = useDoorSensors;
+
     await user.save();
-    res.json({ message: "Actualizado" });
+    res.json({ message: "Perfil actualizado" });
   } catch (err) {
     res.status(500).send("Error");
   }
@@ -275,7 +280,7 @@ app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE SENSORES Y DASHBOARD
+// GESTIÓN DE SENSORES Y DASHBOARD (FLUTTER)
 // ==========================================
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
@@ -365,7 +370,7 @@ app.get("/api/sensors/ids", authenticateUser, (req, res) =>
 );
 
 // ==========================================
-// HARDWARE (ESP32) - RUTA DE CONFIGURACIÓN
+// HARDWARE (ESP32) - CONFIGURACIÓN Y DATOS
 // ==========================================
 app.get("/api/device/config", async (req, res) => {
   try {
@@ -386,49 +391,39 @@ app.post("/api/data", async (req, res) => {
     );
     if (!sensor) return res.status(404).send("Sensor no configurado");
 
+    const user = sensor.owner;
     const tempNum = parseFloat(tempC);
-    const vBat = parseFloat(voltageV);
     const estaAbierta = doorOpen === 1;
 
-    // Guardar medición histórica
+    // Guardar en historial
     await new Measurement({
       sensorId,
-      owner: sensor.owner._id,
+      owner: user._id,
       temperatureC: tempNum,
-      voltageV: vBat,
+      voltageV,
+      doorOpen,
     }).save();
 
     // Lógica de Puerta Persistente
     let doorUpdate = { isDoorOpen: estaAbierta };
     if (estaAbierta) {
-      if (!sensor.isDoorOpen) {
-        doorUpdate.doorOpenedAt = new Date();
-      } else {
+      if (!sensor.isDoorOpen) doorUpdate.doorOpenedAt = new Date();
+      else {
         const diff = new Date() - (sensor.doorOpenedAt || new Date());
-        if (diff > 120000) {
-          // 2 minutos
+        if (diff > 120000 && user.whatsappAlerts) {
+          // Respetar preferencia WA
           await responderWhatsApp(
-            sensor.owner.whatsapp,
-            `🚪 *PUERTA ABIERTA:* El equipo "${sensor.friendlyName}" lleva +2 min abierto.`
+            user.whatsapp,
+            `🚪 *PUERTA ABIERTA:* "${sensor.friendlyName}" lleva +2 min abierto.`
           );
-          doorUpdate.doorOpenedAt = new Date(); // Reset para cooldown
+          doorUpdate.doorOpenedAt = new Date();
         }
       }
-    } else {
-      doorUpdate.doorOpenedAt = null;
-    }
+    } else doorUpdate.doorOpenedAt = null;
 
     await Sensor.updateOne({ hardwareId: sensorId }, { $set: doorUpdate });
 
-    // Lógica Batería
-    if (vBat < 3.5 && vBat > 1.0) {
-      await responderWhatsApp(
-        sensor.owner.whatsapp,
-        `🪫 *BATERÍA BAJA:* "${sensor.friendlyName}" tiene ${vBat.toFixed(2)}V.`
-      );
-    }
-
-    // Lógica Temperatura
+    // Lógica de Alertas de Temperatura
     if (
       tempNum >= sensor.minThreshold &&
       tempNum <= sensor.maxThreshold &&
@@ -444,12 +439,12 @@ app.post("/api/data", async (req, res) => {
     if (tempNum > sensor.maxThreshold) tipoAlerta = "ALTA";
     if (tempNum < sensor.minThreshold) tipoAlerta = "BAJA";
 
-    if (tipoAlerta && !sensor.isAcknowledged && sensor.owner?.whatsapp) {
+    if (tipoAlerta && !sensor.isAcknowledged && user.whatsappAlerts) {
       const ahora = new Date();
       const cooldownMs = (process.env.ALERT_COOLDOWN || 30) * 60000;
       if (!sensor.lastAlertSent || ahora - sensor.lastAlertSent > cooldownMs) {
         await sendWhatsAppAlert(
-          sensor.owner.whatsapp,
+          user.whatsapp,
           sensor.friendlyName,
           tempNum,
           tipoAlerta
@@ -466,16 +461,32 @@ app.post("/api/data", async (req, res) => {
   }
 });
 
+// ==========================================
+// ESTATUS DEL SISTEMA (ONLINE/OFFLINE)
+// ==========================================
 app.post("/api/device/status", async (req, res) => {
-  lastDeviceStatus = { online: true, ...req.body, timestamp: new Date() };
+  lastDeviceStatus = {
+    ...req.body,
+    online: true,
+    timestamp: new Date(),
+  };
   res.json({ message: "OK" });
 });
 
-app.get("/api/device/status", authenticateUser, (req, res) =>
-  res.json(lastDeviceStatus)
-);
+app.get("/api/device/status", authenticateUser, (req, res) => {
+  const now = new Date();
+  // Si no hay noticias en 2 minutos, marcar como offline
+  if (
+    lastDeviceStatus.timestamp &&
+    now - new Date(lastDeviceStatus.timestamp) > 120000
+  ) {
+    lastDeviceStatus.online = false;
+  }
+  res.json(lastDeviceStatus);
+});
+
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Servidor LineUp Integral v3.1 desplegado en puerto ${PORT}`)
+  console.log(`🚀 Servidor LineUp Integral v3.3 desplegado en puerto ${PORT}`)
 );
