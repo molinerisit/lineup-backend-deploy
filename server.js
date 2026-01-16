@@ -16,7 +16,7 @@ app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// ESTADO GLOBAL
+// ESTADO GLOBAL Y CONFIGURACIÓN
 // ==========================================
 let lastDeviceStatus = {
   online: false,
@@ -193,9 +193,10 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             lastM.temperatureC < s.minThreshold)
             ? "🔴"
             : "🟢";
-        const val = lastM ? lastM.temperatureC.toFixed(2) : "--";
-        const puertaIcon = s.isDoorOpen ? "🚪 ABIERTA" : "🔒 Cerrada";
-        reporte += `${icon} *${s.friendlyName}*: ${val}°C (${puertaIcon})\n`;
+        const pIcon = s.isDoorOpen ? "🚪 ABIERTA" : "🔒 Cerrada";
+        reporte += `${icon} *${s.friendlyName}*: ${
+          lastM ? lastM.temperatureC.toFixed(2) : "--"
+        }°C (${pIcon})\n`;
       }
       await responderWhatsApp(from, reporte);
     }
@@ -209,7 +210,8 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
 // ==========================================
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const user = new User(req.body);
+    const { username, password, whatsapp } = req.body;
+    const user = new User({ username, password, whatsapp });
     await user.save();
     res.json({ message: "Usuario creado" });
   } catch (err) {
@@ -273,7 +275,7 @@ app.delete("/api/auth/profile", authenticateUser, async (req, res) => {
 });
 
 // ==========================================
-// GESTIÓN DE SENSORES Y DASHBOARD (FLUTTER)
+// GESTIÓN DE SENSORES Y DASHBOARD
 // ==========================================
 app.get("/api/latest", authenticateUser, async (req, res) => {
   try {
@@ -300,7 +302,7 @@ app.get("/api/latest", authenticateUser, async (req, res) => {
           friendlyName: { $first: "$friendlyName" },
           maxThreshold: { $first: "$maxThreshold" },
           minThreshold: { $first: "$minThreshold" },
-          isDoorOpen: { $first: "$isDoorOpen" }, // NUEVO: Estado de puerta
+          isDoorOpen: { $first: "$isDoorOpen" },
           temperatureC: { $first: "$m.temperatureC" },
           voltageV: { $first: "$m.voltageV" },
           timestamp: { $first: "$m.timestamp" },
@@ -363,8 +365,19 @@ app.get("/api/sensors/ids", authenticateUser, (req, res) =>
 );
 
 // ==========================================
-// RECEPCIÓN DE DATOS (ESP32) - PUERTA PERSISTENTE Y BATERÍA
+// HARDWARE (ESP32) - RUTA DE CONFIGURACIÓN
 // ==========================================
+app.get("/api/device/config", async (req, res) => {
+  try {
+    const sensors = await Sensor.find({ enabled: true }).select(
+      "hardwareId pin -_id"
+    );
+    res.json(sensors);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
 app.post("/api/data", async (req, res) => {
   const { sensorId, tempC, voltageV, doorOpen } = req.body;
   try {
@@ -377,7 +390,7 @@ app.post("/api/data", async (req, res) => {
     const vBat = parseFloat(voltageV);
     const estaAbierta = doorOpen === 1;
 
-    // 1. Guardar Historial
+    // Guardar medición histórica
     await new Measurement({
       sensorId,
       owner: sensor.owner._id,
@@ -385,33 +398,29 @@ app.post("/api/data", async (req, res) => {
       voltageV: vBat,
     }).save();
 
-    // 2. Lógica de Puerta Persistente
+    // Lógica de Puerta Persistente
     let doorUpdate = { isDoorOpen: estaAbierta };
-
     if (estaAbierta) {
       if (!sensor.isDoorOpen) {
-        // Marcamos el inicio de la apertura si antes estaba cerrada
         doorUpdate.doorOpenedAt = new Date();
       } else {
-        // Chequeamos tiempo transcurrido (2 minutos)
         const diff = new Date() - (sensor.doorOpenedAt || new Date());
         if (diff > 120000) {
+          // 2 minutos
           await responderWhatsApp(
             sensor.owner.whatsapp,
-            `🚪 *PUERTA ABIERTA:* El equipo "${sensor.friendlyName}" lleva más de 2 minutos abierto.`
+            `🚪 *PUERTA ABIERTA:* El equipo "${sensor.friendlyName}" lleva +2 min abierto.`
           );
-          // Reseteamos contador para avisar de nuevo en 2 min si sigue abierta
-          doorUpdate.doorOpenedAt = new Date();
+          doorUpdate.doorOpenedAt = new Date(); // Reset para cooldown
         }
       }
     } else {
       doorUpdate.doorOpenedAt = null;
     }
 
-    // Actualizamos el Sensor en DB
     await Sensor.updateOne({ hardwareId: sensorId }, { $set: doorUpdate });
 
-    // 3. Lógica de Batería Baja
+    // Lógica Batería
     if (vBat < 3.5 && vBat > 1.0) {
       await responderWhatsApp(
         sensor.owner.whatsapp,
@@ -419,7 +428,7 @@ app.post("/api/data", async (req, res) => {
       );
     }
 
-    // 4. Lógica de Temperatura
+    // Lógica Temperatura
     if (
       tempNum >= sensor.minThreshold &&
       tempNum <= sensor.maxThreshold &&
@@ -468,7 +477,5 @@ app.get("/api/device/status", authenticateUser, (req, res) =>
 app.get("/health", (req, res) => res.send("ALIVE"));
 
 app.listen(PORT, () =>
-  console.log(
-    `🚀 Servidor LineUp Integral v3 (Puerta Persistente) desplegado en puerto ${PORT}`
-  )
+  console.log(`🚀 Servidor LineUp Integral v3.1 desplegado en puerto ${PORT}`)
 );
