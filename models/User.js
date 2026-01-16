@@ -5,6 +5,9 @@ const UserSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   whatsapp: { type: String, required: true },
+  // --- NUEVOS CAMPOS DE PREFERENCIAS ---
+  whatsappAlerts: { type: Boolean, default: true },
+  useDoorSensors: { type: Boolean, default: false }
 });
 
 // CORRECCIÓN: Eliminamos 'next' porque usamos async/await

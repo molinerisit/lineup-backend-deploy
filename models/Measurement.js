@@ -21,6 +21,7 @@ const MeasurementSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
+    doorOpen: { type: Number, default: 0 }, // <--- AGREGAR ESTA LÍNEA
     timestamp: {
         type: Date,
         default: Date.now,
