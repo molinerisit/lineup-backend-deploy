@@ -12,18 +12,26 @@ const UserSchema = new mongoose.Schema({
 
 // Encriptación automática de contraseña
 UserSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) return next();
+  // Si la contraseña no fue modificada, continuar
+  if (!this.isModified('password')) {
+    return next();
+  }
   
   try {
     // Si la contraseña ya es un hash bcrypt válido, no volver a hashear
-    if (this.password.startsWith('$2a$') || this.password.startsWith('$2b$')) {
+    if (this.password && (this.password.startsWith('$2a$') || this.password.startsWith('$2b$'))) {
       return next();
     }
     
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
+    // Si la contraseña es válida y no es un hash, hashearla
+    if (this.password && typeof this.password === 'string' && this.password.length > 0) {
+      const salt = await bcrypt.genSalt(10);
+      this.password = await bcrypt.hash(this.password, salt);
+    }
+    
     next();
   } catch (error) {
+    console.error("❌ Error in password hashing middleware:", error.message);
     next(error);
   }
 });

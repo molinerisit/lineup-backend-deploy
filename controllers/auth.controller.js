@@ -56,10 +56,16 @@ exports.getProfile = asyncHandler(async (req, res) => {
 
 exports.updateProfile = asyncHandler(async (req, res) => {
   const { whatsapp, oldPassword, newPassword, whatsappAlerts, useDoorSensors } = req.body;
+  
+  if (!whatsapp || !whatsapp.trim()) {
+    return res.status(400).json({ message: "WhatsApp es requerido" });
+  }
+
   const user = await User.findById(req.user.id);
   if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
 
-  if (newPassword) {
+  // Cambio de contraseña
+  if (newPassword && newPassword.trim()) {
     let isMatch = false;
     try {
       isMatch = await bcrypt.compare(oldPassword || "", user.password);
@@ -68,12 +74,12 @@ exports.updateProfile = asyncHandler(async (req, res) => {
       return res.status(401).json({ message: "Contraseña actual incorrecta" });
     }
     if (!isMatch) return res.status(401).json({ message: "Contraseña actual incorrecta" });
-    user.password = newPassword;
+    user.password = newPassword.trim();
   }
   
-  if (typeof whatsapp === "string" && whatsapp.trim()) {
-    user.whatsapp = whatsapp.trim();
-  }
+  // Actualizar campos
+  user.whatsapp = whatsapp.trim();
+  
   if (typeof whatsappAlerts === "boolean") {
     user.whatsappAlerts = whatsappAlerts;
   }
@@ -83,10 +89,16 @@ exports.updateProfile = asyncHandler(async (req, res) => {
 
   try {
     await user.save();
-    res.json({ message: "Perfil actualizado" });
+    res.json({ 
+      message: "Perfil actualizado",
+      username: user.username,
+      whatsapp: user.whatsapp,
+      whatsappAlerts: user.whatsappAlerts,
+      useDoorSensors: user.useDoorSensors
+    });
   } catch (error) {
-    console.error("❌ Error saving user:", error.message);
-    return res.status(500).json({ message: "Error al guardar perfil" });
+    console.error("❌ Error saving user profile:", error.message, error);
+    return res.status(500).json({ message: "Error al guardar perfil: " + error.message });
   }
 });
 
