@@ -10,12 +10,17 @@ const UserSchema = new mongoose.Schema({
   useDoorSensors: { type: Boolean, default: false }
 });
 
-// CORRECCIÓN: Eliminamos 'next' porque usamos async/await
-UserSchema.pre('save', async function() {
-  if (!this.isModified('password')) return;
+// Encriptación automática de contraseña
+UserSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
   
-  // Encriptar contraseña
-  this.password = await bcrypt.hash(this.password, 10);
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
 module.exports = mongoose.model('User', UserSchema);
