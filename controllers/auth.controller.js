@@ -64,18 +64,30 @@ exports.updateProfile = asyncHandler(async (req, res) => {
     try {
       isMatch = await bcrypt.compare(oldPassword || "", user.password);
     } catch (err) {
-      // Hash inválido (usuario creado antes de la corrección) -> tratar como contraseña incorrecta
+      console.error("❌ bcrypt.compare error:", err.message);
       return res.status(401).json({ message: "Contraseña actual incorrecta" });
     }
     if (!isMatch) return res.status(401).json({ message: "Contraseña actual incorrecta" });
     user.password = newPassword;
   }
-  if (typeof whatsapp === "string") user.whatsapp = whatsapp;
-  if (typeof whatsappAlerts !== "undefined") user.whatsappAlerts = !!whatsappAlerts;
-  if (typeof useDoorSensors !== "undefined") user.useDoorSensors = !!useDoorSensors;
+  
+  if (typeof whatsapp === "string" && whatsapp.trim()) {
+    user.whatsapp = whatsapp.trim();
+  }
+  if (typeof whatsappAlerts === "boolean") {
+    user.whatsappAlerts = whatsappAlerts;
+  }
+  if (typeof useDoorSensors === "boolean") {
+    user.useDoorSensors = useDoorSensors;
+  }
 
-  await user.save();
-  res.json({ message: "Perfil actualizado" });
+  try {
+    await user.save();
+    res.json({ message: "Perfil actualizado" });
+  } catch (error) {
+    console.error("❌ Error saving user:", error.message);
+    return res.status(500).json({ message: "Error al guardar perfil" });
+  }
 });
 
 exports.deleteAccount = asyncHandler(async (req, res) => {
