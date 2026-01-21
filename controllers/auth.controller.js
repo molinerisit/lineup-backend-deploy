@@ -60,7 +60,13 @@ exports.updateProfile = asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
 
   if (newPassword) {
-    const isMatch = await bcrypt.compare(oldPassword || "", user.password);
+    let isMatch = false;
+    try {
+      isMatch = await bcrypt.compare(oldPassword || "", user.password);
+    } catch (err) {
+      // Hash inválido (usuario creado antes de la corrección) -> tratar como contraseña incorrecta
+      return res.status(401).json({ message: "Contraseña actual incorrecta" });
+    }
     if (!isMatch) return res.status(401).json({ message: "Contraseña actual incorrecta" });
     user.password = newPassword;
   }
