@@ -5,6 +5,8 @@ const ESP_IDS = require("../constants/espHardwareIds");
 const asyncHandler = require("../utils/async-handler");
 
 exports.getLatest = asyncHandler(async (req, res) => {
+  console.log('📡 GET /sensors/latest - Usuario:', req.user.id);
+  
   const data = await Sensor.aggregate([
     {
       $match: {
@@ -35,6 +37,8 @@ exports.getLatest = asyncHandler(async (req, res) => {
       },
     },
   ]);
+  
+  console.log(`✅ Sensores encontrados: ${data.length}`, data.map(d => ({ id: d._id, name: d.friendlyName })));
   res.json(data);
 });
 
@@ -51,6 +55,8 @@ exports.getHistory = asyncHandler(async (req, res) => {
 
 exports.upsertSensor = asyncHandler(async (req, res) => {
   const { hardwareId, friendlyName, minThreshold, maxThreshold, voltageThreshold, pin } = req.body;
+  console.log('📤 POST /sensors/config - Datos:', { hardwareId, friendlyName, minThreshold, maxThreshold, pin });
+  
   if (!hardwareId || !friendlyName || pin === undefined)
     return res.status(400).json({ message: "hardwareId, friendlyName y pin son requeridos" });
 
@@ -72,6 +78,7 @@ exports.upsertSensor = asyncHandler(async (req, res) => {
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
 
+  console.log('✅ Sensor guardado:', sensor._id, sensor.hardwareId, sensor.friendlyName);
   res.json(sensor);
 });
 
