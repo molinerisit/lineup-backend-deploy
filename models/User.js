@@ -1,5 +1,5 @@
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
 const UserSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
@@ -7,33 +7,24 @@ const UserSchema = new mongoose.Schema({
   whatsapp: { type: String, required: true },
   // --- NUEVOS CAMPOS DE PREFERENCIAS ---
   whatsappAlerts: { type: Boolean, default: true },
-  useDoorSensors: { type: Boolean, default: false }
+  useDoorSensors: { type: Boolean, default: false },
 });
 
 // Encriptación automática de contraseña
-UserSchema.pre('save', async function(next) {
-  // Si la contraseña no fue modificada, continuar
-  if (!this.isModified('password')) {
-    return next();
+UserSchema.pre("save", async function () {
+  // Si la contraseña no fue modificada, no hacer nada
+  if (!this.isModified("password")) return;
+
+  // Si ya es un hash bcrypt, salir
+  if (this.password && (this.password.startsWith("$2a$") || this.password.startsWith("$2b$"))) {
+    return;
   }
-  
-  try {
-    // Si la contraseña ya es un hash bcrypt válido, no volver a hashear
-    if (this.password && (this.password.startsWith('$2a$') || this.password.startsWith('$2b$'))) {
-      return next();
-    }
-    
-    // Si la contraseña es válida y no es un hash, hashearla
-    if (this.password && typeof this.password === 'string' && this.password.length > 0) {
-      const salt = await bcrypt.genSalt(10);
-      this.password = await bcrypt.hash(this.password, salt);
-    }
-    
-    next();
-  } catch (error) {
-    console.error("❌ Error in password hashing middleware:", error.message);
-    next(error);
+
+  // Hashear contraseñas en texto plano
+  if (this.password && typeof this.password === "string" && this.password.length > 0) {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
   }
 });
 
-module.exports = mongoose.model('User', UserSchema);
+module.exports = mongoose.model("User", UserSchema);

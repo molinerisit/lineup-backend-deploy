@@ -56,8 +56,9 @@ exports.getProfile = asyncHandler(async (req, res) => {
 
 exports.updateProfile = asyncHandler(async (req, res) => {
   const { whatsapp, oldPassword, newPassword, whatsappAlerts, useDoorSensors } = req.body;
-  
-  if (!whatsapp || !whatsapp.trim()) {
+
+  const whatsappStr = (whatsapp ?? "").toString().trim();
+  if (!whatsappStr) {
     return res.status(400).json({ message: "WhatsApp es requerido" });
   }
 
@@ -78,7 +79,7 @@ exports.updateProfile = asyncHandler(async (req, res) => {
   }
   
   // Actualizar campos
-  user.whatsapp = whatsapp.trim();
+  user.whatsapp = whatsappStr;
   
   if (typeof whatsappAlerts === "boolean") {
     user.whatsappAlerts = whatsappAlerts;
